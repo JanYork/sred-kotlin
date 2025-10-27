@@ -1,6 +1,7 @@
 package me.ixor.sred.declarative
 
 import me.ixor.sred.core.*
+import me.ixor.sred.declarative.annotations.AnnotationProcessor
 import kotlinx.coroutines.*
 import java.util.concurrent.ConcurrentHashMap
 
@@ -104,6 +105,50 @@ class StateFlow {
      */
     fun bind(id: String, function: StateFunction) {
         functions[id] = function
+    }
+    
+    /**
+     * 绑定函数引用到状态
+     */
+    fun bindFunction(id: String, functionRef: suspend (StateContext) -> StateResult) {
+        functions[id] = functionRef
+    }
+    
+    /**
+     * 批量绑定函数
+     */
+    fun bindFunctions(vararg bindings: Pair<String, StateFunction>) {
+        bindings.forEach { (stateId, function) ->
+            functions[stateId] = function
+        }
+    }
+    
+    /**
+     * 使用DSL绑定函数
+     */
+    fun bindFunctions(binding: FunctionBindingDSL.() -> Unit) {
+        val dsl = FunctionBindingDSL()
+        dsl.binding()
+        
+        // 将绑定的函数注册到状态流
+        dsl.getAllFunctions().forEach { (stateId, function) ->
+            this.bind(stateId, function)
+        }
+    }
+    
+    /**
+     * 使用注解处理器绑定函数
+     */
+    fun bindAnnotatedFunctions(instance: Any) {
+        AnnotationProcessor.processAnnotatedClass(instance)
+        
+        // 将注解处理器中的函数绑定到状态流
+        AnnotationProcessor.getAllFunctionInfo().forEach { info ->
+            val function = AnnotationProcessor.getStateFunction(info.stateId)
+            if (function != null) {
+                this.bind(info.stateId, function)
+            }
+        }
     }
     
     /**
