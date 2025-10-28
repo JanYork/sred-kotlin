@@ -18,9 +18,9 @@ object StandardDemo {
     class UserRegistrationService {
         
         suspend fun validateUser(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
-            val password = context.getData<String>("password")
-            val username = context.getData<String>("username")
+            val email = context.getLocalState("email", String::class.java)
+            val password = context.getLocalState("password", String::class.java)
+            val username = context.getLocalState("username", String::class.java)
             
             DemoFramework.info("验证用户信息: $email")
             delay(1000)
@@ -40,8 +40,8 @@ object StandardDemo {
         }
         
         suspend fun storeUser(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
-            val username = context.getData<String>("username")
+            val email = context.getLocalState("email", String::class.java)
+            val username = context.getLocalState("username", String::class.java)
             
             DemoFramework.info("存储用户信息: $username")
             delay(1500)
@@ -56,7 +56,7 @@ object StandardDemo {
         }
         
         suspend fun sendEmailNotification(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
+            val email = context.getLocalState("email", String::class.java)
             
             DemoFramework.info("发送邮件通知: $email")
             delay(2000)

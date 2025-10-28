@@ -17,9 +17,9 @@ object FinalStandardDemo {
     class UserRegistrationService {
         
         suspend fun validateUser(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
-            val password = context.getData<String>("password")
-            val username = context.getData<String>("username")
+            val email = context.localState["email"] as? String
+            val password = context.localState["password"] as? String
+            val username = context.localState["username"] as? String
             
             println("  🔍 验证用户信息: $email")
             delay(1000)
@@ -39,8 +39,8 @@ object FinalStandardDemo {
         }
         
         suspend fun storeUser(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
-            val username = context.getData<String>("username")
+            val email = context.localState["email"] as? String
+            val username = context.localState["username"] as? String
             
             println("  💾 存储用户信息: $username")
             delay(1500)
@@ -55,7 +55,7 @@ object FinalStandardDemo {
         }
         
         suspend fun sendEmailNotification(context: StateContext): StateResult {
-            val email = context.getData<String>("email")
+            val email = context.localState["email"] as? String
             
             println("  📧 发送邮件通知: $email")
             delay(2000)

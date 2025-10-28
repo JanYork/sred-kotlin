@@ -2,6 +2,8 @@ package me.ixor.sred.declarative.format
 
 import me.ixor.sred.core.*
 import me.ixor.sred.declarative.*
+import com.fasterxml.jackson.module.kotlin.*
+import com.fasterxml.jackson.databind.ObjectMapper
 
 /**
  * 状态定义格式接口

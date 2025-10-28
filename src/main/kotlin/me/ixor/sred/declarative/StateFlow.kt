@@ -12,7 +12,12 @@ data class StateResult(
     val success: Boolean,
     val data: Map<String, Any> = emptyMap(),
     val error: Throwable? = null
-)
+) {
+    companion object {
+        fun success(data: Map<String, Any> = emptyMap()): StateResult = StateResult(true, data)
+        fun failure(message: String, error: Throwable? = null): StateResult = StateResult(false, error = error ?: RuntimeException(message))
+    }
+}
 
 /**
  * 状态函数
@@ -143,10 +148,10 @@ class StateFlow {
         AnnotationProcessor.processAnnotatedClass(instance)
         
         // 将注解处理器中的函数绑定到状态流
-        AnnotationProcessor.getAllFunctionInfo().forEach { info ->
-            val function = AnnotationProcessor.getStateFunction(info.stateId)
+        AnnotationProcessor.getAllFunctionInfo().forEach { (stateId, info) ->
+            val function = AnnotationProcessor.getStateFunction(stateId)
             if (function != null) {
-                this.bind(info.stateId, function)
+                this.bind(stateId, function)
             }
         }
     }

@@ -339,7 +339,7 @@ object FormatConfigDemo {
                 DemoFramework.info("JSON配置内容:")
                 println("   ${jsonContent.lines().take(10).joinToString("\n   ")}...")
                 
-                val stateFlow = StateDefinitionParser.parse(SimpleJsonFormat, jsonContent)
+                val stateFlow = StateDefinitionParser.parse(JsonFormat, jsonContent)
                 val stateMachine = stateFlow.build()
                 
                 DemoFramework.success("JSON解析完成，状态数量: ${stateFlow.states.size}")
@@ -383,7 +383,7 @@ object FormatConfigDemo {
                 println("   ${xmlContent.lines().take(5).joinToString("\n   ")}...")
                 
                 DemoFramework.info("转换为JSON格式:")
-                val jsonContent = SimpleJsonFormat.serialize(definition)
+                val jsonContent = JsonFormat.serialize(definition)
                 println("   ${jsonContent.lines().take(5).joinToString("\n   ")}...")
                 
                 DemoFramework.success("格式转换完成")

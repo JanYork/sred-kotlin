@@ -93,7 +93,7 @@ object DemoFramework {
      * 批量执行演示
      */
     suspend fun runDemos(
-        demos: List<Pair<DemoConfig, suspend () -> Unit>>
+        demos: List<Pair<DemoConfig, suspend () -> DemoResult>>
     ): List<DemoResult> {
         val results = mutableListOf<DemoResult>()
         
@@ -103,7 +103,7 @@ object DemoFramework {
         
         demos.forEachIndexed { index, (config, block) ->
             println("\n📋 演示 ${index + 1}/${demos.size}")
-            val result = runDemo(config, block)
+            val result = block()
             results.add(result)
             
             if (index < demos.size - 1) {
