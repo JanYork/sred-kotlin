@@ -330,7 +330,7 @@ class TransitionRegistryImpl : TransitionRegistry {
 /**
  * 调度器统计信息实现
  */
-private class OrchestratorStatisticsImpl {
+internal class OrchestratorStatisticsImpl {
     private var totalEventsProcessed = 0L
     private var successfulTransitions = 0L
     private var failedTransitions = 0L

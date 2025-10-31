@@ -335,7 +335,7 @@ class InMemoryStatePersistence : StatePersistence {
 /**
  * 状态管理器统计信息实现
  */
-private class StateManagerStatisticsImpl {
+internal class StateManagerStatisticsImpl {
     private var totalTransitions = 0L
     private var errorCount = 0L
     private var totalTransitionTime = 0L

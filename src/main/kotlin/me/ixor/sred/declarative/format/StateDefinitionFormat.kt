@@ -4,6 +4,10 @@ import me.ixor.sred.core.*
 import me.ixor.sred.declarative.*
 import com.fasterxml.jackson.module.kotlin.*
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.DeserializationContext
+import com.fasterxml.jackson.databind.JsonDeserializer
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 
 /**
  * 状态定义格式接口
@@ -43,11 +47,26 @@ data class StateInfo(
 )
 
 /**
+ * TransitionCondition自定义反序列化器
+ */
+class TransitionConditionDeserializer : JsonDeserializer<TransitionCondition>() {
+    override fun deserialize(p: JsonParser, ctxt: DeserializationContext): TransitionCondition {
+        val value = p.text
+        return when (value) {
+            "Success", "SUCCESS" -> TransitionCondition.Success
+            "Failure", "FAILURE" -> TransitionCondition.Failure
+            else -> TransitionCondition.Custom(value)
+        }
+    }
+}
+
+/**
  * 转移信息
  */
 data class TransitionInfo(
     val from: String,
     val to: String,
+    @JsonDeserialize(using = TransitionConditionDeserializer::class)
     val condition: TransitionCondition,
     val priority: Int = 0,
     val description: String = "",
