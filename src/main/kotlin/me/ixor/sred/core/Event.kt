@@ -130,13 +130,17 @@ class EventBuilder {
     
     fun id(id: EventId) = apply { this.id = id }
     fun type(type: EventType) = apply { this.type = type }
+    fun type(name: String, version: String = "1.0", namespace: String = "default") = 
+        apply { this.type = EventType(name, version, namespace) }
     fun name(name: String) = apply { this.name = name }
     fun description(description: String) = apply { this.description = description }
     fun timestamp(timestamp: Instant) = apply { this.timestamp = timestamp }
     fun source(source: String) = apply { this.source = source }
     fun priority(priority: EventPriority) = apply { this.priority = priority }
     fun payload(key: String, value: Any) = apply { this.payload[key] = value }
+    fun payload(map: Map<String, Any>) = apply { this.payload.putAll(map) }
     fun metadata(key: String, value: Any) = apply { this.metadata[key] = value }
+    fun metadata(map: Map<String, Any>) = apply { this.metadata.putAll(map) }
     
     fun build(): Event {
         require(type != null) { "Event type is required" }

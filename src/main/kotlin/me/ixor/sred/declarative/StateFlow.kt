@@ -78,7 +78,7 @@ class StateFlow {
     
     
     /**
-     * 声明状态
+     * 声明状态 - 支持链式调用
      */
     fun state(
         id: String,
@@ -88,50 +88,55 @@ class StateFlow {
         isInitial: Boolean = false,
         isFinal: Boolean = false,
         isError: Boolean = false
-    ) {
+    ): StateFlow {
         states[id] = StateDefinition(id, name, type, parentId, isInitial, isFinal, isError)
+        return this
     }
     
     /**
-     * 声明转移
+     * 声明转移 - 支持链式调用
      */
     fun transition(
         from: String,
         to: String,
         condition: TransitionCondition = TransitionCondition.Success,
         priority: Int = 0
-    ) {
+    ): StateFlow {
         transitions.computeIfAbsent(from) { mutableListOf() }
             .add(TransitionDefinition(from, to, condition, priority))
+        return this
     }
     
     /**
-     * 绑定函数到状态
+     * 绑定函数到状态 - 支持链式调用
      */
-    fun bind(id: String, function: StateFunction) {
+    fun bind(id: String, function: StateFunction): StateFlow {
         functions[id] = function
+        return this
     }
     
     /**
-     * 绑定函数引用到状态
+     * 绑定函数引用到状态 - 支持链式调用
      */
-    fun bindFunction(id: String, functionRef: suspend (StateContext) -> StateResult) {
+    fun bindFunction(id: String, functionRef: suspend (StateContext) -> StateResult): StateFlow {
         functions[id] = functionRef
+        return this
     }
     
     /**
-     * 批量绑定函数
+     * 批量绑定函数 - 支持链式调用
      */
-    fun bindFunctions(vararg bindings: Pair<String, StateFunction>) {
+    fun bindFunctions(vararg bindings: Pair<String, StateFunction>): StateFlow {
         bindings.forEach { (stateId, function) ->
             functions[stateId] = function
         }
+        return this
     }
     
     /**
-     * 使用DSL绑定函数
+     * 使用DSL绑定函数 - 支持链式调用
      */
-    fun bindFunctions(binding: FunctionBindingDSL.() -> Unit) {
+    fun bindFunctions(binding: FunctionBindingDSL.() -> Unit): StateFlow {
         val dsl = FunctionBindingDSL()
         dsl.binding()
         
@@ -139,12 +144,13 @@ class StateFlow {
         dsl.getAllFunctions().forEach { (stateId, function) ->
             this.bind(stateId, function)
         }
+        return this
     }
     
     /**
-     * 使用注解处理器绑定函数
+     * 使用注解处理器绑定函数 - 支持链式调用
      */
-    fun bindAnnotatedFunctions(instance: Any) {
+    fun bindAnnotatedFunctions(instance: Any): StateFlow {
         AnnotationProcessor.processAnnotatedClass(instance)
         
         // 将注解处理器中的函数绑定到状态流
@@ -154,6 +160,7 @@ class StateFlow {
                 this.bind(stateId, function)
             }
         }
+        return this
     }
     
     /**

@@ -222,9 +222,13 @@ class StateContextBuilder {
     fun currentStateId(currentStateId: StateId?) = apply { this.currentStateId = currentStateId }
     fun createdAt(createdAt: Instant) = apply { this.createdAt = createdAt }
     fun localState(key: String, value: Any) = apply { this.localState[key] = value }
+    fun localState(map: Map<String, Any>) = apply { this.localState.putAll(map) }
     fun globalState(key: String, value: Any) = apply { this.globalState[key] = value }
+    fun globalState(map: Map<String, Any>) = apply { this.globalState.putAll(map) }
     fun addEvent(event: Event) = apply { this.recentEvents.add(event) }
+    fun addEvents(events: Collection<Event>) = apply { this.recentEvents.addAll(events) }
     fun metadata(key: String, value: Any) = apply { this.metadata[key] = value }
+    fun metadata(map: Map<String, Any>) = apply { this.metadata.putAll(map) }
     
     fun build(): StateContext {
         return StateContextImpl(
