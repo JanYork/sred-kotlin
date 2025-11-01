@@ -1,43 +1,56 @@
-package me.ixor.sred.persistence
+package me.ixor.sred.persistence.adapters
 
 import me.ixor.sred.core.*
-import me.ixor.sred.state.StatePersistence
+import me.ixor.sred.persistence.AbstractPersistenceAdapter
+import me.ixor.sred.persistence.ExtendedStatePersistence
+import me.ixor.sred.persistence.SqlitePersistenceConfig
 import me.ixor.sred.state.StateHistoryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.Closeable
 import java.io.File
 import java.sql.*
 import java.time.Instant
-import java.util.*
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
 
 /**
- * SQLite状态持久化实现
+ * SQLite持久化适配器
  * 
- * 根据论文4.4节：状态上下文的持久化与恢复机制，
- * 实现过程级恢复和语义级自愈能力。
+ * 基于JDBC的SQLite实现，提供状态上下文的持久化与恢复功能
+ * 实现 Closeable 接口，支持资源自动管理
  */
-class SqliteStatePersistence(
-    private val dbPath: String = "sred_state.db"
-) : StatePersistence {
+class SqlitePersistenceAdapter(
+    config: SqlitePersistenceConfig = SqlitePersistenceConfig()
+) : AbstractPersistenceAdapter(config), ExtendedStatePersistence, Closeable {
     
-    private val objectMapper = jacksonObjectMapper()
+    private val log = logger<SqlitePersistenceAdapter>()
     private var connection: Connection? = null
+    @Volatile
+    private var closed = false
     
     init {
-        initializeDatabase()
+        // 初始化在initialize方法中进行，支持异步初始化
     }
     
-    /**
-     * 初始化数据库
-     */
-    private fun initializeDatabase() {
-        val dbFile = File(dbPath)
-        val url = "jdbc:sqlite:${dbFile.absolutePath}"
+    override suspend fun initialize() = withContext(Dispatchers.IO) {
+        if (closed) {
+            throw PersistenceException("Adapter has been closed")
+        }
+        if (connection != null) return@withContext
         
-        connection = DriverManager.getConnection(url).apply {
-            createTables()
+        try {
+            val dbFile = File(config.connectionString)
+            val url = "jdbc:sqlite:${dbFile.absolutePath}"
+            
+            log.debug { "Initializing SQLite connection to: ${dbFile.absolutePath}" }
+            
+            connection = DriverManager.getConnection(url).apply {
+                createTables()
+            }
+            
+            log.info { "SQLite connection initialized successfully" }
+        } catch (e: Exception) {
+            log.error(e) { "Failed to initialize SQLite connection" }
+            throw PersistenceException("Failed to initialize SQLite connection: ${e.message}", e)
         }
     }
     
@@ -110,7 +123,10 @@ class SqliteStatePersistence(
     
     override suspend fun saveContext(context: StateContext) {
         withContext(Dispatchers.IO) {
-            val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+            initialize() // 确保已初始化
+            ensureOpen()
+            
+            val conn = connection!!
             
             conn.prepareStatement("""
                 INSERT OR REPLACE INTO state_contexts 
@@ -121,16 +137,19 @@ class SqliteStatePersistence(
                 stmt.setString(2, context.currentStateId)
                 stmt.setString(3, context.createdAt.toString())
                 stmt.setString(4, context.lastUpdatedAt.toString())
-                stmt.setString(5, objectMapper.writeValueAsString(context.localState))
-                stmt.setString(6, objectMapper.writeValueAsString(context.globalState))
-                stmt.setString(7, objectMapper.writeValueAsString(context.metadata))
+                stmt.setString(5, serialize(context.localState))
+                stmt.setString(6, serialize(context.globalState))
+                stmt.setString(7, serialize(context.metadata))
                 stmt.executeUpdate()
             }
         }
     }
     
     override suspend fun loadContext(contextId: ContextId): StateContext? = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+        initialize() // 确保已初始化
+        ensureOpen()
+        
+        val conn = connection!!
         
         conn.prepareStatement("""
             SELECT id, current_state_id, created_at, last_updated_at, local_state, global_state, metadata
@@ -139,24 +158,15 @@ class SqliteStatePersistence(
             stmt.setString(1, contextId)
             stmt.executeQuery().use { rs ->
                 if (rs.next()) {
-                    val recentEvents = loadRecentEvents(contextId)
-                    
-                    @Suppress("UNCHECKED_CAST")
-                    val localStateMap = objectMapper.readValue<Map<String, Any>>(rs.getString("local_state"))
-                    @Suppress("UNCHECKED_CAST")
-                    val globalStateMap = objectMapper.readValue<Map<String, Any>>(rs.getString("global_state"))
-                    @Suppress("UNCHECKED_CAST")
-                    val metadataMap = objectMapper.readValue<Map<String, Any>>(rs.getString("metadata"))
-                    
-                    return@withContext StateContextImpl(
+                    return@withContext buildStateContext(
                         id = rs.getString("id"),
                         currentStateId = rs.getString("current_state_id"),
                         createdAt = Instant.parse(rs.getString("created_at")),
                         lastUpdatedAt = Instant.parse(rs.getString("last_updated_at")),
-                        localState = localStateMap,
-                        globalState = globalStateMap,
-                        recentEvents = recentEvents,
-                        metadata = metadataMap
+                        localStateJson = rs.getString("local_state"),
+                        globalStateJson = rs.getString("global_state"),
+                        metadataJson = rs.getString("metadata"),
+                        contextId = contextId
                     )
                 } else {
                     null
@@ -165,60 +175,11 @@ class SqliteStatePersistence(
         }
     }
     
-    /**
-     * 加载最近的事件历史
-     */
-    private suspend fun loadRecentEvents(contextId: ContextId, limit: Int = 100): List<Event> {
-        val conn = connection ?: return emptyList()
-        
-        return withContext(Dispatchers.IO) {
-            conn.prepareStatement("""
-                SELECT event_id, event_type, event_name, event_data, timestamp
-                FROM event_history
-                WHERE context_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """.trimIndent()).use { stmt ->
-                stmt.setString(1, contextId)
-                stmt.setInt(2, limit)
-                stmt.executeQuery().use { rs ->
-                    val events = mutableListOf<Event>()
-                    while (rs.next()) {
-                        try {
-                            val eventData = objectMapper.readValue<Map<String, Any>>(rs.getString("event_data"))
-                            val eventTypeStr = rs.getString("event_type")
-                            val parts = eventTypeStr.split(":")
-                            
-                            val event = SimpleEvent(
-                                id = rs.getString("event_id"),
-                                type = EventType(
-                                    name = parts.getOrNull(1) ?: "",
-                                    version = parts.getOrNull(2) ?: "1.0",
-                                    namespace = parts.getOrNull(0) ?: "default"
-                                ),
-                                name = rs.getString("event_name"),
-                                description = eventData["description"] as? String ?: "",
-                                timestamp = Instant.parse(rs.getString("timestamp")),
-                                source = eventData["source"] as? String ?: "unknown",
-                                priority = EventPriority.values().find { 
-                                    it.name == (eventData["priority"] as? String) 
-                                } ?: EventPriority.NORMAL,
-                                payload = ((eventData["payload"] as? Map<*, *>)?.mapValues { it.value as Any } ?: emptyMap()) as Map<String, Any>,
-                                metadata = ((eventData["metadata"] as? Map<*, *>)?.mapValues { it.value as Any } ?: emptyMap()) as Map<String, Any>
-                            )
-                            events.add(event)
-                        } catch (e: Exception) {
-                            // 跳过无法解析的事件
-                        }
-                    }
-                    events.reversed() // 恢复时间顺序
-                }
-            }
-        }
-    }
-    
     override suspend fun deleteContext(contextId: ContextId) = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+        initialize() // 确保已初始化
+        ensureOpen()
+        
+        val conn = connection!!
         
         conn.autoCommit = false
         try {
@@ -250,7 +211,10 @@ class SqliteStatePersistence(
     }
     
     override suspend fun listContextIds(): List<ContextId> = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+        initialize() // 确保已初始化
+        ensureOpen()
+        
+        val conn = connection!!
         
         conn.prepareStatement("SELECT id FROM state_contexts ORDER BY last_updated_at DESC").use { stmt ->
             stmt.executeQuery().use { rs ->
@@ -263,66 +227,102 @@ class SqliteStatePersistence(
         }
     }
     
-    /**
-     * 保存事件到历史
-     */
-    suspend fun saveEvent(contextId: ContextId, event: Event) = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+    override suspend fun loadRecentEvents(contextId: ContextId, limit: Int): List<Event> {
+        val conn = connection ?: return emptyList()
         
-        val eventData = mapOf(
-            "description" to event.description,
-            "source" to event.source,
-            "priority" to event.priority.name,
-            "payload" to event.payload,
-            "metadata" to event.metadata
-        )
-        
-        conn.prepareStatement("""
-            INSERT INTO event_history 
-            (context_id, event_id, event_type, event_name, event_data, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """.trimIndent()).use { stmt ->
-            stmt.setString(1, contextId)
-            stmt.setString(2, event.id)
-            stmt.setString(3, event.type.toString())
-            stmt.setString(4, event.name)
-            stmt.setString(5, objectMapper.writeValueAsString(eventData))
-            stmt.setString(6, event.timestamp.toString())
-            stmt.executeUpdate()
+        return withContext(Dispatchers.IO) {
+            conn.prepareStatement("""
+                SELECT event_id, event_type, event_name, event_data, timestamp
+                FROM event_history
+                WHERE context_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """.trimIndent()).use { stmt ->
+                stmt.setString(1, contextId)
+                stmt.setInt(2, limit)
+                stmt.executeQuery().use { rs ->
+                    val events = mutableListOf<Event>()
+                    while (rs.next()) {
+                        try {
+                            val eventData = deserialize<Map<String, Any>>(rs.getString("event_data"))
+                            val timestamp = Instant.parse(rs.getString("timestamp"))
+                            
+                            val event = buildEventFromData(
+                                eventId = rs.getString("event_id"),
+                                eventTypeStr = rs.getString("event_type"),
+                                eventName = rs.getString("event_name"),
+                                eventData = eventData,
+                                timestamp = timestamp
+                            )
+                            events.add(event)
+                        } catch (e: Exception) {
+                            // 跳过无法解析的事件
+                        }
+                    }
+                    events.reversed() // 恢复时间顺序
+                }
+            }
         }
     }
     
-    /**
-     * 保存状态历史
-     */
-    suspend fun saveStateHistory(
+    override suspend fun saveEvent(contextId: ContextId, event: Event) {
+        withContext(Dispatchers.IO) {
+            initialize() // 确保已初始化
+            ensureOpen()
+            
+            val conn = connection!!
+            
+            val eventData = buildEventData(event)
+            
+            conn.prepareStatement("""
+                INSERT INTO event_history 
+                (context_id, event_id, event_type, event_name, event_data, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """.trimIndent()).use { stmt ->
+                stmt.setString(1, contextId)
+                stmt.setString(2, event.id)
+                stmt.setString(3, event.type.toString())
+                stmt.setString(4, event.name)
+                stmt.setString(5, serialize(eventData))
+                stmt.setString(6, event.timestamp.toString())
+                stmt.executeUpdate()
+            }
+        }
+    }
+    
+    override suspend fun saveStateHistory(
         contextId: ContextId,
         fromStateId: StateId?,
         toStateId: StateId,
         eventId: EventId?,
-        timestamp: Instant = Instant.now()
-    ) = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
-        
-        conn.prepareStatement("""
-            INSERT INTO state_history 
-            (context_id, from_state_id, to_state_id, event_id, timestamp)
-            VALUES (?, ?, ?, ?, ?)
-        """.trimIndent()).use { stmt ->
-            stmt.setString(1, contextId)
-            stmt.setString(2, fromStateId)
-            stmt.setString(3, toStateId)
-            stmt.setString(4, eventId)
-            stmt.setString(5, timestamp.toString())
-            stmt.executeUpdate()
+        timestamp: Instant
+    ) {
+        withContext(Dispatchers.IO) {
+            initialize() // 确保已初始化
+            ensureOpen()
+            
+            val conn = connection!!
+            
+            conn.prepareStatement("""
+                INSERT INTO state_history 
+                (context_id, from_state_id, to_state_id, event_id, timestamp)
+                VALUES (?, ?, ?, ?, ?)
+            """.trimIndent()).use { stmt ->
+                stmt.setString(1, contextId)
+                stmt.setString(2, fromStateId)
+                stmt.setString(3, toStateId)
+                stmt.setString(4, eventId)
+                stmt.setString(5, timestamp.toString())
+                stmt.executeUpdate()
+            }
         }
     }
     
-    /**
-     * 获取状态历史
-     */
-    suspend fun getStateHistory(contextId: ContextId): List<StateHistoryEntry> = withContext(Dispatchers.IO) {
-        val conn = connection ?: throw IllegalStateException("Database connection not initialized")
+    override suspend fun getStateHistory(contextId: ContextId): List<StateHistoryEntry> = withContext(Dispatchers.IO) {
+        initialize() // 确保已初始化
+        ensureOpen()
+        
+        val conn = connection!!
         
         conn.prepareStatement("""
             SELECT from_state_id, to_state_id, event_id, timestamp
@@ -352,12 +352,39 @@ class SqliteStatePersistence(
         }
     }
     
+    override fun close() {
+        if (closed) return
+        
+        synchronized(this) {
+            if (closed) return
+            closed = true
+            
+            try {
+                val conn = connection
+                if (conn != null && !conn.isClosed) {
+                    conn.close()
+                    log.debug { "SQLite connection closed" }
+                }
+            } catch (e: Exception) {
+                log.error(e) { "Error closing SQLite connection" }
+            } finally {
+                connection = null
+            }
+        }
+    }
+    
     /**
-     * 关闭数据库连接
+     * 检查适配器是否已关闭
      */
-    fun close() {
-        connection?.close()
-        connection = null
+    fun isClosed(): Boolean = closed
+    
+    /**
+     * 确保连接可用，如果已关闭则抛出异常
+     */
+    private fun ensureOpen() {
+        if (closed || connection == null) {
+            throw PersistenceException("Persistence adapter is closed or not initialized")
+        }
     }
 }
 

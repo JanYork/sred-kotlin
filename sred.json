@@ -1,0 +1,85 @@
+{
+  "name": "转账流程",
+  "description": "用户A向用户B转账的状态流程",
+  "version": "1.0.0",
+  "states": [
+    {
+      "id": "transfer_initiated",
+      "name": "转账已发起",
+      "type": "INITIAL",
+      "isInitial": true
+    },
+    {
+      "id": "validating_accounts",
+      "name": "验证账户",
+      "type": "NORMAL"
+    },
+    {
+      "id": "checking_balance",
+      "name": "检查余额",
+      "type": "NORMAL"
+    },
+    {
+      "id": "transferring",
+      "name": "执行转账",
+      "type": "NORMAL"
+    },
+    {
+      "id": "transfer_success",
+      "name": "转账成功",
+      "type": "FINAL",
+      "isFinal": true
+    },
+    {
+      "id": "transfer_failed",
+      "name": "转账失败",
+      "type": "ERROR",
+      "isError": true
+    }
+  ],
+  "transitions": [
+    {
+      "from": "transfer_initiated",
+      "to": "validating_accounts",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "validating_accounts",
+      "to": "checking_balance",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "validating_accounts",
+      "to": "transfer_failed",
+      "condition": "Failure",
+      "priority": 0
+    },
+    {
+      "from": "checking_balance",
+      "to": "transferring",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "checking_balance",
+      "to": "transfer_failed",
+      "condition": "Failure",
+      "priority": 0
+    },
+    {
+      "from": "transferring",
+      "to": "transfer_success",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "transferring",
+      "to": "transfer_failed",
+      "condition": "Failure",
+      "priority": 0
+    }
+  ]
+}
+

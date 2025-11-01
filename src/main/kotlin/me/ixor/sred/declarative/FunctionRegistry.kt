@@ -73,13 +73,15 @@ object FunctionRegistry {
  */
 class UserRegistrationService {
     
+    private val log = logger<UserRegistrationService>()
+    
     @StateHandler("registration_validating", "用户参数校验")
     suspend fun validateUser(context: StateContext): StateResult {
-        val email = context.localState["email"] as? String
-        val password = context.localState["password"] as? String
-        val username = context.localState["username"] as? String
+        val email = context.getLocalState<String>("email")
+        val password = context.getLocalState<String>("password")
+        val username = context.getLocalState<String>("username")
         
-        println("🔍 正在校验用户参数...")
+        log.info { "正在校验用户参数..." }
         delay(100) // 模拟校验时间
         
         return when {
@@ -89,7 +91,7 @@ class UserRegistrationService {
             password.length < 6 -> StateResult(false, error = IllegalArgumentException("密码长度不能少于6位"))
             username.isNullOrBlank() -> StateResult(false, error = IllegalArgumentException("用户名不能为空"))
             else -> {
-                println("✅ 用户参数校验通过")
+                log.info { "用户参数校验通过" }
                 StateResult(true, mapOf(
                     "validatedEmail" to email,
                     "validatedPassword" to password,
@@ -101,42 +103,42 @@ class UserRegistrationService {
     
     @StateHandler("registration_storing", "存储用户信息")
     suspend fun storeUser(context: StateContext): StateResult {
-        val email = context.localState["validatedEmail"] as? String
-        val password = context.localState["validatedPassword"] as? String
-        val username = context.localState["validatedUsername"] as? String
+        val email = context.getLocalState<String>("validatedEmail")
+        val password = context.getLocalState<String>("validatedPassword")
+        val username = context.getLocalState<String>("validatedUsername")
         
-        println("💾 正在存储用户信息...")
+        log.info { "正在存储用户信息..." }
         delay(200) // 模拟存储时间
         
         return try {
             // 模拟存储操作
             val userId = "user_${System.currentTimeMillis()}"
-            println("✅ 用户信息存储成功，用户ID: $userId")
+            log.info { "用户信息存储成功，用户ID: $userId" }
             StateResult(true, mapOf(
-                "userId" to (userId ?: ""),
+                "userId" to userId,
                 "storedEmail" to (email ?: ""),
                 "storedUsername" to (username ?: "")
             ))
         } catch (e: Exception) {
-            println("❌ 用户信息存储失败: ${e.message}")
+            log.error(e) { "用户信息存储失败: ${e.message}" }
             StateResult(false, error = e)
         }
     }
     
     @StateHandler("email_sending", "发送验证邮件")
     suspend fun sendVerificationEmail(context: StateContext): StateResult {
-        val email = context.localState["storedEmail"] as? String ?: ""
-        val userId = context.localState["userId"] as? String ?: ""
+        val email = context.getLocalStateOrDefault<String>("storedEmail", "")
+        val userId = context.getLocalStateOrDefault<String>("userId", "")
         
-        println("📧 正在发送验证邮件到: $email")
+        log.info { "正在发送验证邮件到: $email" }
         
         // 异步发送邮件，不等待结果
         GlobalScope.launch {
             try {
                 delay(1000) // 模拟邮件发送时间
-                println("✅ 验证邮件发送成功")
+                log.info { "验证邮件发送成功" }
             } catch (e: Exception) {
-                println("❌ 验证邮件发送失败: ${e.message}")
+                log.error(e) { "验证邮件发送失败: ${e.message}" }
             }
         }
         

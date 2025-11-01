@@ -1,7 +1,7 @@
 package me.ixor.sred.state
 
 import me.ixor.sred.core.*
-import me.ixor.sred.persistence.SqliteStatePersistence
+import me.ixor.sred.persistence.ExtendedStatePersistence
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,7 +20,7 @@ import java.util.UUID
  */
 class EnhancedStateManager(
     override val stateRegistry: StateRegistry,
-    persistence: SqliteStatePersistence,
+    persistence: ExtendedStatePersistence,
     private val stateLock: StateLock = StateLockFactory.create(),
     private val traceCollector: TraceCollector = TraceCollectorFactory.create()
 ) : StateManager {
@@ -30,7 +30,7 @@ class EnhancedStateManager(
     override var currentContext: StateContext? = null
         private set
     
-    private val sqlitePersistence = persistence
+    private val extendedPersistence = persistence
     
     private val stateHistory = mutableListOf<StateHistoryEntry>()
     private val mutex = Mutex()
@@ -211,9 +211,9 @@ class EnhancedStateManager(
                     
                     // 保存到数据库
                     newContext.recentEvents.lastOrNull()?.let { event ->
-                        sqlitePersistence.saveEvent(newContext.id, event)
+                        extendedPersistence.saveEvent(newContext.id, event)
                     }
-                    sqlitePersistence.saveStateHistory(
+                    extendedPersistence.saveStateHistory(
                         newContext.id,
                         oldStateId,
                         stateId,
@@ -323,7 +323,7 @@ class EnhancedStateManager(
         val contextId = currentContext?.id
         return if (contextId != null) {
             runBlocking {
-                sqlitePersistence.getStateHistory(contextId)
+                extendedPersistence.getStateHistory(contextId)
             }
         } else {
             stateHistory.toList()
@@ -358,7 +358,10 @@ object EnhancedStateManagerFactory {
         stateLock: StateLock = StateLockFactory.create(),
         traceCollector: TraceCollector = TraceCollectorFactory.create()
     ): EnhancedStateManager {
-        val persistence = SqliteStatePersistence(dbPath)
+        val persistence = me.ixor.sred.persistence.PersistenceAdapterFactory.createSqliteAdapter(dbPath)
+        runBlocking {
+            persistence.initialize()
+        }
         return EnhancedStateManager(stateRegistry, persistence, stateLock, traceCollector)
     }
 }

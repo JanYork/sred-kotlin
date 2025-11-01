@@ -3,7 +3,8 @@ package me.ixor.sred.orchestrator
 import me.ixor.sred.core.*
 import me.ixor.sred.event.*
 import me.ixor.sred.state.*
-import me.ixor.sred.persistence.SqliteStatePersistence
+import me.ixor.sred.persistence.PersistenceAdapterFactory
+import me.ixor.sred.persistence.ExtendedStatePersistence
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import java.io.File
@@ -16,6 +17,7 @@ import java.io.File
 class StateOrchestratorBuilder {
     private var stateRegistry: StateRegistry? = null
     private var statePersistence: StatePersistence? = null
+    private var extendedStatePersistence: ExtendedStatePersistence? = null
     private var stateLock: StateLock? = null
     private var traceCollector: TraceCollector? = null
     private var eventBus: EventBus? = null
@@ -37,6 +39,17 @@ class StateOrchestratorBuilder {
      */
     fun withStatePersistence(persistence: StatePersistence) = apply {
         this.statePersistence = persistence
+        if (persistence is ExtendedStatePersistence) {
+            this.extendedStatePersistence = persistence
+        }
+    }
+    
+    /**
+     * 设置扩展的状态持久化（支持历史记录功能）
+     */
+    fun withExtendedStatePersistence(persistence: ExtendedStatePersistence) = apply {
+        this.extendedStatePersistence = persistence
+        this.statePersistence = persistence
     }
     
     /**
@@ -44,7 +57,7 @@ class StateOrchestratorBuilder {
      */
     fun withSqlitePersistence(dbPath: String = "sred_state.db") = apply {
         this.persistenceDbPath = dbPath
-        this.statePersistence = SqliteStatePersistence(dbPath)
+        // 适配器将在 build() 方法中初始化
     }
     
     /**
@@ -102,22 +115,21 @@ class StateOrchestratorBuilder {
     suspend fun build(): StateOrchestrator {
         // 创建默认组件（如果未提供）
         val registry = stateRegistry ?: StateRegistryFactory.create()
-        val persistence = statePersistence ?: SqliteStatePersistence(persistenceDbPath)
         val lock = stateLock ?: StateLockFactory.create()
         val collector = traceCollector ?: TraceCollectorFactory.create()
         val bus = eventBus ?: EventBusFactory.create()
         val transRegistry = transitionRegistry ?: TransitionRegistryImpl()
         
-        // 创建StateManager（需要SqliteStatePersistence）
-        val sqlitePersistence = if (persistence is SqliteStatePersistence) {
-            persistence
-        } else {
-            SqliteStatePersistence(persistenceDbPath)
+        // 创建扩展的持久化适配器（EnhancedStateManager需要）
+        val extendedPersistence = extendedStatePersistence ?: run {
+            val adapter = PersistenceAdapterFactory.createSqliteAdapter(persistenceDbPath)
+            adapter.initialize()
+            adapter
         }
         
         val stateManager = EnhancedStateManager(
             stateRegistry = registry,
-            persistence = sqlitePersistence,
+            persistence = extendedPersistence,
             stateLock = lock,
             traceCollector = collector
         )

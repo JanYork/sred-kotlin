@@ -185,12 +185,12 @@ class EnhancedStateOrchestrator(
         return when (event.temporalType) {
             EventTemporalType.SYNCHRONOUS -> {
                 // 同步事件，立即处理
-                processEvent(event as Event)
+                processEvent(event)
             }
             EventTemporalType.ASYNCHRONOUS -> {
                 // 异步事件，在后台处理
                 CoroutineScope(Dispatchers.Default).launch {
-                    processEvent(event as Event)
+                    processEvent(event)
                 }
                 OrchestrationResult(
                     success = true,
@@ -199,11 +199,11 @@ class EnhancedStateOrchestrator(
             }
             EventTemporalType.DEFERRED -> {
                 // 延迟事件，应该已经通过调度器在正确时间发布
-                processEvent(event as Event)
+                processEvent(event)
             }
             EventTemporalType.PERIODIC -> {
                 // 周期事件，应该已经通过调度器在正确时间发布
-                processEvent(event as Event)
+                processEvent(event)
             }
         }
     }

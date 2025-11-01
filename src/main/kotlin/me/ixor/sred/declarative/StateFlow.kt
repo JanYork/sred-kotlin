@@ -183,11 +183,18 @@ class StateMachine(private val flow: StateFlow) {
      * 启动状态机实例
      */
     suspend fun start(instanceId: String, initialContext: StateContext = StateContextFactory.create()): StateMachineInstance {
+        // 确保初始上下文中设置了初始状态ID
+        val initialStateId = initialContext.currentStateId ?: flow.states.values.firstOrNull { it.isInitial }?.id
+        val contextWithState = if (initialStateId != null && initialContext.currentStateId == null) {
+            initialContext.copy(currentStateId = initialStateId)
+        } else {
+            initialContext
+        }
         val initialState = flow.states.values.find { it.isInitial }
             ?: throw IllegalStateException("No initial state defined")
         
         currentStates[instanceId] = initialState.id
-        contexts[instanceId] = initialContext
+        contexts[instanceId] = contextWithState.copy(currentStateId = initialState.id)
         
         return StateMachineInstance(this, instanceId)
     }
@@ -213,15 +220,18 @@ class StateMachine(private val flow: StateFlow) {
             StateResult(true) // 没有函数的状态直接成功
         }
         
-        // 更新上下文
-        val newContext = StateContextFactory.create(
-            localState = context.localState + result.data,
-            globalState = context.globalState
+        // 查找下一个状态
+        val nextStateId = findNextState(currentStateId, result)
+        
+        // 更新上下文（包含状态数据和新的状态ID）
+        val updatedLocalState = context.localState + result.data
+        val newContext = context.copy(
+            currentStateId = nextStateId,
+            localState = updatedLocalState
         )
         contexts[instanceId] = newContext
         
-        // 查找下一个状态
-        val nextStateId = findNextState(currentStateId, result)
+        // 更新当前状态映射
         if (nextStateId != null) {
             currentStates[instanceId] = nextStateId
         }
