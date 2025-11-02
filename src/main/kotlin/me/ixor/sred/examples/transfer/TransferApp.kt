@@ -9,7 +9,7 @@ import kotlinx.coroutines.*
  */
 fun runTransfer(args: Array<String>) {
     runBlocking {
-        val configPath = args.getOrNull(0) ?: "sred.json"
+        val configPath = args.getOrNull(0) ?: "transfer.json"
         val dbPath = "transfer_state.db"
         
         // 初始化测试数据

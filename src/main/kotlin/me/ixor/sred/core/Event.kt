@@ -199,4 +199,19 @@ object EventFactory {
         .priority(priority)
         .apply { payload.forEach { (k, v) -> payload(k, v) } }
         .build()
+    
+    /**
+     * 创建简单事件（使用事件名称作为类型）
+     */
+    fun createSimpleEvent(
+        eventName: String,
+        payload: Map<String, Any> = emptyMap()
+    ): Event = create(
+        type = EventType("system", eventName),
+        name = eventName,
+        description = "",
+        source = "system",
+        priority = EventPriority.NORMAL,
+        payload = payload
+    )
 }

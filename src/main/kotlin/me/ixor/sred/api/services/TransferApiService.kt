@@ -24,7 +24,7 @@ class TransferApiService {
     init {
         runBlocking {
             engine = SRED.fromConfig(
-                configPath = "sred.json",
+                configPath = "transfer.json",
                 dbPath = "transfer_state.db",
                 handlers = service
             )

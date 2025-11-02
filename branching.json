@@ -1,0 +1,211 @@
+{
+  "name": "分支和并行执行示例",
+  "description": "演示条件分支和并行执行的工作流",
+  "version": "1.0.0",
+  "config": {
+    "pauseable": true,
+    "defaultTimeout": 300,
+    "autoResume": false
+  },
+  "states": [
+    {
+      "id": "init",
+      "name": "初始状态",
+      "type": "INITIAL",
+      "isInitial": true
+    },
+    {
+      "id": "validate",
+      "name": "验证订单"
+    },
+    {
+      "id": "amount_check",
+      "name": "金额检查",
+      "type": "NORMAL",
+      "executionMode": "CONDITIONAL",
+      "branchConfig": [
+        {
+          "name": "大额审核路径",
+          "targetStateId": "large_amount_audit",
+          "priority": 2,
+          "description": "金额大于等于10000时走大额审核",
+          "condition": {
+            "type": "LOCAL_STATE",
+            "key": "amount",
+            "operator": "GE",
+            "value": 10000
+          }
+        },
+        {
+          "name": "小额审核路径",
+          "targetStateId": "small_amount_audit",
+          "priority": 1,
+          "description": "金额小于10000时走小额审核",
+          "condition": {
+            "type": "LOCAL_STATE",
+            "key": "amount",
+            "operator": "LT",
+            "value": 10000
+          }
+        }
+      ]
+    },
+    {
+      "id": "large_amount_audit",
+      "name": "大额审核"
+    },
+    {
+      "id": "small_amount_audit",
+      "name": "小额审核"
+    },
+    {
+      "id": "parallel_audit",
+      "name": "并行审核",
+      "type": "NORMAL",
+      "executionMode": "PARALLEL",
+      "parallelConfig": {
+        "branches": [
+          {
+            "branchId": "audit1",
+            "targetStateId": "audit_state_1",
+            "description": "审核员1审核"
+          },
+          {
+            "branchId": "audit2",
+            "targetStateId": "audit_state_2",
+            "description": "审核员2审核"
+          },
+          {
+            "branchId": "audit3",
+            "targetStateId": "audit_state_3",
+            "description": "审核员3审核"
+          }
+        ],
+        "waitStrategy": "ALL",
+        "timeout": 3600,
+        "errorStrategy": "FAIL_ALL"
+      }
+    },
+    {
+      "id": "audit_state_1",
+      "name": "审核员1审核"
+    },
+    {
+      "id": "audit_state_2",
+      "name": "审核员2审核"
+    },
+    {
+      "id": "audit_state_3",
+      "name": "审核员3审核"
+    },
+    {
+      "id": "audit_join",
+      "name": "合并审核结果",
+      "type": "NORMAL",
+      "executionMode": "JOIN"
+    },
+    {
+      "id": "user_type_check",
+      "name": "用户类型检查",
+      "type": "NORMAL",
+      "executionMode": "CONDITIONAL",
+      "branchConfig": [
+        {
+          "name": "VIP大额用户",
+          "targetStateId": "vip_large_process",
+          "priority": 3,
+          "description": "VIP用户且金额大于等于50000",
+          "condition": {
+            "type": "COMPOSITE",
+            "logicalOperator": "AND",
+            "conditions": [
+              {
+                "type": "LOCAL_STATE",
+                "key": "userType",
+                "operator": "EQ",
+                "value": "VIP"
+              },
+              {
+                "type": "LOCAL_STATE",
+                "key": "amount",
+                "operator": "GE",
+                "value": 50000
+              }
+            ]
+          }
+        },
+        {
+          "name": "普通用户",
+          "targetStateId": "normal_process",
+          "priority": 1,
+          "description": "非VIP用户",
+          "condition": {
+            "type": "LOCAL_STATE",
+            "key": "userType",
+            "operator": "NE",
+            "value": "VIP"
+          }
+        }
+      ]
+    },
+    {
+      "id": "vip_large_process",
+      "name": "VIP大额处理"
+    },
+    {
+      "id": "normal_process",
+      "name": "普通处理"
+    },
+    {
+      "id": "completed",
+      "name": "完成",
+      "type": "FINAL",
+      "isFinal": true
+    }
+  ],
+  "transitions": [
+    {
+      "from": "init",
+      "to": "validate",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "validate",
+      "to": "amount_check",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "large_amount_audit",
+      "to": "completed",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "small_amount_audit",
+      "to": "completed",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "parallel_audit",
+      "to": "audit_join",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "audit_join",
+      "to": "completed",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "user_type_check",
+      "to": "completed",
+      "condition": "Success",
+      "priority": 1
+    }
+  ]
+}
+

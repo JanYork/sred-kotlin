@@ -2,7 +2,14 @@ package me.ixor.sred.declarative
 
 import me.ixor.sred.core.*
 import me.ixor.sred.declarative.annotations.AnnotationProcessor
+import me.ixor.sred.declarative.BranchingSupport.ExecutionMode
+import me.ixor.sred.declarative.BranchingSupport.BranchConfiguration
+import me.ixor.sred.declarative.BranchingSupport.ParallelConfiguration
+import me.ixor.sred.declarative.BranchingSupport.ParallelBranch
+import me.ixor.sred.declarative.BranchingSupport.ParallelWaitStrategy
+import me.ixor.sred.declarative.BranchingSupport.ParallelErrorStrategy
 import kotlinx.coroutines.*
+import kotlinx.coroutines.Deferred
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -64,7 +71,11 @@ class StateFlow {
         val pauseable: Boolean = false,      // 是否支持长时间停顿
         val timeout: Long? = null,           // 超时时间（秒），null 表示不超时，-1 表示无限久
         val pauseOnEnter: Boolean = false,   // 进入此状态时自动暂停
-        val timeoutAction: TimeoutAction? = null  // 超时后的操作
+        val timeoutAction: TimeoutAction? = null,  // 超时后的操作
+        // 执行模式配置：支持顺序、并行、分支执行
+        val executionMode: ExecutionMode = ExecutionMode.SEQUENTIAL,  // 执行模式
+        val branchConfig: List<BranchConfiguration>? = null,  // 分支配置（CONDITIONAL模式）
+        val parallelConfig: ParallelConfiguration? = null  // 并行配置（PARALLEL模式）
     )
     
     /**
@@ -111,13 +122,85 @@ class StateFlow {
         pauseable: Boolean? = null,          // null 表示继承流程配置
         timeout: Long? = null,               // 超时时间（秒），null 表示使用流程默认值，-1 表示无限久
         pauseOnEnter: Boolean = false,       // 进入此状态时自动暂停
-        timeoutAction: TimeoutAction? = null  // 超时后的操作
+        timeoutAction: TimeoutAction? = null,  // 超时后的操作
+        executionMode: ExecutionMode = ExecutionMode.SEQUENTIAL,  // 执行模式
+        branchConfig: List<BranchConfiguration>? = null,  // 分支配置（CONDITIONAL模式）
+        parallelConfig: ParallelConfiguration? = null  // 并行配置（PARALLEL模式）
     ): StateFlow {
         val statePauseable = pauseable ?: this.pauseable
         // timeout 为 null 时使用流程级别的 defaultTimeout
         val stateTimeout = timeout ?: defaultTimeout
-        states[id] = StateDefinition(id, name, type, parentId, isInitial, isFinal, isError, statePauseable, stateTimeout, pauseOnEnter, timeoutAction)
+        states[id] = StateDefinition(id, name, type, parentId, isInitial, isFinal, isError, 
+            statePauseable, stateTimeout, pauseOnEnter, timeoutAction, 
+            executionMode, branchConfig, parallelConfig)
         return this
+    }
+    
+    /**
+     * 声明条件分支状态
+     */
+    fun conditionalState(
+        id: String,
+        name: String,
+        branches: List<BranchConfiguration>,
+        parentId: String? = null,
+        pauseable: Boolean? = null,
+        timeout: Long? = null
+    ): StateFlow {
+        return state(
+            id = id,
+            name = name,
+            type = StateType.NORMAL,
+            parentId = parentId,
+            pauseable = pauseable,
+            timeout = timeout,
+            executionMode = ExecutionMode.CONDITIONAL,
+            branchConfig = branches
+        )
+    }
+    
+    /**
+     * 声明并行执行状态（Fork）
+     */
+    fun parallelState(
+        id: String,
+        name: String,
+        parallelConfig: ParallelConfiguration,
+        parentId: String? = null,
+        pauseable: Boolean? = null,
+        timeout: Long? = null
+    ): StateFlow {
+        return state(
+            id = id,
+            name = name,
+            type = StateType.NORMAL,
+            parentId = parentId,
+            pauseable = pauseable,
+            timeout = timeout,
+            executionMode = ExecutionMode.PARALLEL,
+            parallelConfig = parallelConfig
+        )
+    }
+    
+    /**
+     * 声明分支合并状态（Join）
+     */
+    fun joinState(
+        id: String,
+        name: String,
+        parentId: String? = null,
+        pauseable: Boolean? = null,
+        timeout: Long? = null
+    ): StateFlow {
+        return state(
+            id = id,
+            name = name,
+            type = StateType.NORMAL,
+            parentId = parentId,
+            pauseable = pauseable,
+            timeout = timeout,
+            executionMode = ExecutionMode.JOIN
+        )
     }
     
     /**
@@ -263,6 +346,7 @@ class StateMachine(private val flow: StateFlow) {
     
     /**
      * 处理事件
+     * 支持顺序、并行、条件分支三种执行模式
      */
     suspend fun processEvent(instanceId: String, event: Event): StateResult {
         val currentStateId = currentStates[instanceId] ?: throw IllegalStateException("Instance not found: $instanceId")
@@ -270,6 +354,25 @@ class StateMachine(private val flow: StateFlow) {
         
         val stateDef = flow.states[currentStateId] ?: throw IllegalStateException("State not found: $currentStateId")
         
+        // 根据执行模式选择处理逻辑
+        return when (stateDef.executionMode) {
+            ExecutionMode.SEQUENTIAL -> processSequential(instanceId, currentStateId, context, event, stateDef)
+            ExecutionMode.CONDITIONAL -> processConditional(instanceId, currentStateId, context, event, stateDef)
+            ExecutionMode.PARALLEL -> processParallel(instanceId, currentStateId, context, event, stateDef)
+            ExecutionMode.JOIN -> processJoin(instanceId, currentStateId, context, event, stateDef)
+        }
+    }
+    
+    /**
+     * 处理顺序执行
+     */
+    private suspend fun processSequential(
+        instanceId: String,
+        currentStateId: String,
+        context: StateContext,
+        event: Event,
+        stateDef: StateFlow.StateDefinition
+    ): StateResult {
         // 执行状态函数
         val function = flow.functions[currentStateId]
         val result = if (function != null) {
@@ -290,10 +393,252 @@ class StateMachine(private val flow: StateFlow) {
         val newContext = context.copy(
             currentStateId = nextStateId,
             localState = updatedLocalState
-        )
+        ).addEvent(event)
         contexts[instanceId] = newContext
         
         // 更新当前状态映射
+        if (nextStateId != null) {
+            currentStates[instanceId] = nextStateId
+        }
+        
+        return result
+    }
+    
+    /**
+     * 处理条件分支执行
+     * 基于上下文进行条件评估：s' = T(s, e, C)
+     */
+    private suspend fun processConditional(
+        instanceId: String,
+        currentStateId: String,
+        context: StateContext,
+        event: Event,
+        stateDef: StateFlow.StateDefinition
+    ): StateResult {
+        val branches = stateDef.branchConfig ?: throw IllegalStateException("Conditional state requires branch configuration")
+        
+        // 创建当前状态对象用于条件评估
+        val currentState = object : me.ixor.sred.core.State {
+            override val id: me.ixor.sred.core.StateId = currentStateId
+            override val name: String = stateDef.name
+            override val description: String = ""
+            override fun canEnter(context: me.ixor.sred.core.StateContext): Boolean = true
+            override suspend fun onEnter(context: me.ixor.sred.core.StateContext): me.ixor.sred.core.StateContext = context
+            override suspend fun onExit(context: me.ixor.sred.core.StateContext): me.ixor.sred.core.StateContext = context
+            override fun canHandle(event: me.ixor.sred.core.Event, context: me.ixor.sred.core.StateContext): Boolean = false
+            override suspend fun handleEvent(event: me.ixor.sred.core.Event, context: me.ixor.sred.core.StateContext): me.ixor.sred.core.StateTransitionResult {
+                throw UnsupportedOperationException()
+            }
+            override fun getPossibleTransitions(context: me.ixor.sred.core.StateContext): Set<me.ixor.sred.core.StateId> = emptySet()
+        }
+        
+        // 评估所有分支条件，选择满足条件且优先级最高的分支
+        val matchedBranch = branches
+            .filter { branch: BranchConfiguration ->
+                branch.condition.evaluate(currentState, event, context)
+            }
+            .maxByOrNull { it: BranchConfiguration -> it.priority }
+        
+        if (matchedBranch == null) {
+            // 没有匹配的分支，返回失败
+            return StateResult(false, error = IllegalStateException("No branch condition matched for state $currentStateId"))
+        }
+        
+        // 执行状态函数（如果存在）
+        val function = flow.functions[currentStateId]
+        val result = if (function != null) {
+            try {
+                function(context)
+            } catch (e: Exception) {
+                StateResult(false, error = e)
+            }
+        } else {
+            StateResult(true)
+        }
+        
+        // 转移到匹配分支的目标状态
+        val targetStateId = matchedBranch.targetStateId
+        val updatedLocalState = context.localState + result.data + mapOf(
+            "branchName" to matchedBranch.name,
+            "branchSelected" to true
+        )
+        val newContext = context.copy(
+            currentStateId = targetStateId,
+            localState = updatedLocalState
+        ).addEvent(event)
+        contexts[instanceId] = newContext
+        currentStates[instanceId] = targetStateId
+        
+        return result.copy(data = result.data + mapOf("selectedBranch" to matchedBranch.name))
+    }
+    
+    /**
+     * 处理并行执行（Fork）
+     */
+    private suspend fun processParallel(
+        instanceId: String,
+        currentStateId: String,
+        context: StateContext,
+        event: Event,
+        stateDef: StateFlow.StateDefinition
+    ): StateResult = withContext(Dispatchers.Default) {
+        val parallelConfig = stateDef.parallelConfig ?: throw IllegalStateException("Parallel state requires parallel configuration")
+        
+        // 执行当前状态函数（如果有）
+        val function = flow.functions[currentStateId]
+        val initialResult = if (function != null) {
+            try {
+                function(context)
+            } catch (e: Exception) {
+                StateResult(false, error = e)
+            }
+        } else {
+            StateResult(true)
+        }
+        
+        if (!initialResult.success) {
+            return@withContext initialResult
+        }
+        
+        // 创建并行执行任务
+        val parallelJobs: List<Deferred<StateResult>> = parallelConfig.branches.map { branch: ParallelBranch ->
+            async {
+                try {
+                    // 为每个分支创建子实例（或使用分支ID标识）
+                    val branchInstanceId = "${instanceId}_${branch.branchId}"
+                    val branchContext = context.copy(
+                        currentStateId = branch.targetStateId,
+                        localState = context.localState + mapOf("branchId" to branch.branchId)
+                    )
+                    
+                    // 执行分支状态函数
+                    val branchFunction = flow.functions[branch.targetStateId]
+                    if (branchFunction != null) {
+                        branchFunction(branchContext)
+                    } else {
+                        StateResult(true, data = mapOf("branchId" to branch.branchId))
+                    }
+                } catch (e: Exception) {
+                    StateResult(false, error = e, data = mapOf("branchId" to branch.branchId))
+                }
+            }
+        }
+        
+        // 根据等待策略等待结果
+        val results = when (parallelConfig.waitStrategy) {
+            ParallelWaitStrategy.ALL -> parallelJobs.map { it.await() }
+            ParallelWaitStrategy.ANY -> {
+                // 等待任一分支完成
+                val completed = mutableListOf<StateResult>()
+                parallelJobs.forEach { job ->
+                    try {
+                        completed.add(job.await())
+                        // 取消其他任务
+                        parallelJobs.forEach { if (it != job) it.cancel() }
+                    } catch (e: Exception) {
+                        // 忽略取消异常
+                    }
+                }
+                completed
+            }
+            ParallelWaitStrategy.N_COUNT -> {
+                // TODO: 实现等待N个分支完成的逻辑
+                parallelJobs.map { it: Deferred<StateResult> -> it.await() }
+            }
+        }
+        
+        // 根据错误策略处理结果
+        val allSuccess = results.all { it.success }
+        val finalResult = when (parallelConfig.errorStrategy) {
+            ParallelErrorStrategy.FAIL_ALL -> {
+                if (allSuccess) {
+                    StateResult(true, data = mapOf(
+                        "parallelResults" to results.mapIndexed { index, r ->
+                            mapOf(
+                                "branchIndex" to index,
+                                "success" to r.success,
+                                "data" to r.data
+                            )
+                        }
+                    ))
+                } else {
+                    StateResult(false, error = RuntimeException("Some parallel branches failed"))
+                }
+            }
+            ParallelErrorStrategy.IGNORE_FAILURES -> {
+                val successResults = results.filter { it.success }
+                StateResult(true, data = mapOf(
+                    "parallelResults" to successResults.mapIndexed { index, r ->
+                        mapOf("branchIndex" to index, "data" to r.data)
+                    }
+                ))
+            }
+            ParallelErrorStrategy.TOLERATE_FAILURES -> {
+                // TODO: 实现容错策略
+                StateResult(allSuccess)
+            }
+            else -> {
+                // 默认策略
+                StateResult(allSuccess)
+            }
+        }
+        
+        // 合并所有分支的结果数据
+        val mergedData = results.flatMap { it.data.entries }.associate { it.key to it.value } +
+                mapOf("parallelResults" to results.size)
+        
+        // 查找下一个状态（通常是Join状态）
+        val nextStateId = findNextState(currentStateId, finalResult)
+        
+        // 更新上下文
+        val updatedLocalState = context.localState + initialResult.data + mergedData
+        val newContext = context.copy(
+            currentStateId = nextStateId,
+            localState = updatedLocalState
+        ).addEvent(event)
+        contexts[instanceId] = newContext
+        
+        if (nextStateId != null) {
+            currentStates[instanceId] = nextStateId
+        }
+        
+        return@withContext finalResult.copy(data = mergedData)
+    }
+    
+    /**
+     * 处理分支合并（Join）
+     */
+    private suspend fun processJoin(
+        instanceId: String,
+        currentStateId: String,
+        context: StateContext,
+        event: Event,
+        stateDef: StateFlow.StateDefinition
+    ): StateResult {
+        // Join状态通常用于合并并行执行的结果
+        // 执行Join状态函数（如果有）
+        val function = flow.functions[currentStateId]
+        val result = if (function != null) {
+            try {
+                function(context)
+            } catch (e: Exception) {
+                StateResult(false, error = e)
+            }
+        } else {
+            StateResult(true)
+        }
+        
+        // 查找下一个状态
+        val nextStateId = findNextState(currentStateId, result)
+        
+        // 更新上下文
+        val updatedLocalState = context.localState + result.data
+        val newContext = context.copy(
+            currentStateId = nextStateId,
+            localState = updatedLocalState
+        ).addEvent(event)
+        contexts[instanceId] = newContext
+        
         if (nextStateId != null) {
             currentStates[instanceId] = nextStateId
         }

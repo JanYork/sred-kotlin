@@ -18,7 +18,7 @@ fun runMultiWorkflow(args: Array<String>) {
         
         // 1. 创建引擎（使用转账流程作为默认流程）
         val engine = SRED.fromConfig(
-            configPath = "sred.json",
+            configPath = "transfer.json",
             dbPath = "multi_workflow.db",
             handlers = TransferService(
                 TransferFixtures.createDefault().users,

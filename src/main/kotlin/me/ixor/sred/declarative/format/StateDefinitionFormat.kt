@@ -2,6 +2,17 @@ package me.ixor.sred.declarative.format
 
 import me.ixor.sred.core.*
 import me.ixor.sred.declarative.*
+import me.ixor.sred.declarative.BranchingSupport.ExecutionMode
+import me.ixor.sred.declarative.BranchingSupport.BranchConfiguration
+import me.ixor.sred.declarative.BranchingSupport.ParallelConfiguration
+import me.ixor.sred.declarative.BranchingSupport.ParallelBranch
+import me.ixor.sred.declarative.BranchingSupport.ParallelWaitStrategy
+import me.ixor.sred.declarative.BranchingSupport.ParallelErrorStrategy
+import me.ixor.sred.declarative.BranchingSupport.ContextConditionEvaluator
+import me.ixor.sred.declarative.BranchingSupport.ContextConditionEvaluatorBuilder
+import me.ixor.sred.declarative.BranchingSupport.ExpressionConditionEvaluator
+import me.ixor.sred.declarative.BranchingSupport.ComparisonOperator
+import me.ixor.sred.declarative.BranchingSupport.LogicalOperator
 import com.fasterxml.jackson.module.kotlin.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.DeserializationContext
@@ -72,7 +83,57 @@ data class StateInfo(
     val pauseable: Boolean? = null,  // null 表示继承流程配置
     val timeout: Long? = null,       // 超时时间（秒），null 表示不超时，-1 表示无限久
     val pauseOnEnter: Boolean = false,  // 进入此状态时自动暂停
-    val timeoutAction: TimeoutAction? = null  // 超时后的操作
+    val timeoutAction: TimeoutAction? = null,  // 超时后的操作
+    // 执行模式配置
+    val executionMode: String? = null,  // "SEQUENTIAL", "PARALLEL", "CONDITIONAL", "JOIN"
+    val branchConfig: List<BranchConfigInfo>? = null,  // 分支配置（CONDITIONAL模式）
+    val parallelConfig: ParallelConfigInfo? = null  // 并行配置（PARALLEL模式）
+)
+
+/**
+ * 分支配置信息（JSON格式）
+ */
+data class BranchConfigInfo(
+    val name: String,
+    val targetStateId: String,
+    val condition: ConditionInfo,  // 条件信息
+    val priority: Int = 0,
+    val description: String = "",
+    val metadata: Map<String, Any> = emptyMap()
+)
+
+/**
+ * 条件信息（JSON格式）
+ */
+data class ConditionInfo(
+    val type: String,  // "LOCAL_STATE", "GLOBAL_STATE", "EXPRESSION", "COMPOSITE"
+    val key: String? = null,  // 用于LOCAL_STATE/GLOBAL_STATE类型
+    val operator: String? = null,  // "EQ", "NE", "GT", "GE", "LT", "LE", "IN", "CONTAINS"
+    val value: Any? = null,  // 比较值
+    val expression: String? = null,  // 用于EXPRESSION类型
+    val expressionType: String? = null,  // "JSON_PATH", "SIMPLE", "GROOVY"
+    val logicalOperator: String? = null,  // "AND", "OR", "NOT" 用于COMPOSITE类型
+    val conditions: List<ConditionInfo>? = null  // 用于COMPOSITE类型
+)
+
+/**
+ * 并行配置信息（JSON格式）
+ */
+data class ParallelConfigInfo(
+    val branches: List<ParallelBranchInfo>,
+    val waitStrategy: String = "ALL",  // "ALL", "ANY", "N_COUNT"
+    val timeout: Long? = null,
+    val errorStrategy: String = "FAIL_ALL"  // "FAIL_ALL", "IGNORE_FAILURES", "TOLERATE_FAILURES"
+)
+
+/**
+ * 并行分支信息（JSON格式）
+ */
+data class ParallelBranchInfo(
+    val branchId: String,
+    val targetStateId: String,
+    val description: String = "",
+    val metadata: Map<String, Any> = emptyMap()
 )
 
 /**
@@ -214,6 +275,38 @@ object StateDefinitionParser {
                 )
             }
             
+            // 转换执行模式
+            val executionMode = convertExecutionMode(stateInfo.executionMode)
+            
+            // 转换分支配置
+            val branchConfig = stateInfo.branchConfig?.map { branchInfo ->
+                BranchConfiguration(
+                    name = branchInfo.name,
+                    targetStateId = branchInfo.targetStateId,
+                    condition = convertCondition(branchInfo.condition),
+                    priority = branchInfo.priority,
+                    description = branchInfo.description,
+                    metadata = branchInfo.metadata
+                )
+            }
+            
+            // 转换并行配置
+            val parallelConfig = stateInfo.parallelConfig?.let { parallelInfo ->
+                ParallelConfiguration(
+                    branches = parallelInfo.branches.map { branchInfo ->
+                        ParallelBranch(
+                            branchId = branchInfo.branchId,
+                            targetStateId = branchInfo.targetStateId,
+                            description = branchInfo.description,
+                            metadata = branchInfo.metadata
+                        )
+                    },
+                    waitStrategy = convertWaitStrategy(parallelInfo.waitStrategy),
+                    timeout = parallelInfo.timeout,
+                    errorStrategy = convertErrorStrategy(parallelInfo.errorStrategy)
+                )
+            }
+            
             flow.state(
                 id = stateInfo.id,
                 name = stateInfo.name,
@@ -225,7 +318,10 @@ object StateDefinitionParser {
                 pauseable = stateInfo.pauseable,
                 timeout = stateInfo.timeout,
                 pauseOnEnter = stateInfo.pauseOnEnter,
-                timeoutAction = timeoutAction
+                timeoutAction = timeoutAction,
+                executionMode = executionMode,
+                branchConfig = branchConfig,
+                parallelConfig = parallelConfig
             )
         }
         
@@ -265,6 +361,117 @@ object StateDefinitionParser {
                 // 这里可以解析自定义条件
                 true
             }
+        }
+    }
+    
+    /**
+     * 转换执行模式
+     */
+    private fun convertExecutionMode(mode: String?): ExecutionMode {
+        return when (mode?.uppercase()) {
+            "PARALLEL" -> ExecutionMode.PARALLEL
+            "CONDITIONAL" -> ExecutionMode.CONDITIONAL
+            "JOIN" -> ExecutionMode.JOIN
+            "SEQUENTIAL", null -> ExecutionMode.SEQUENTIAL
+            else -> ExecutionMode.SEQUENTIAL
+        }
+    }
+    
+    /**
+     * 转换条件信息
+     */
+    private fun convertCondition(conditionInfo: ConditionInfo): ContextConditionEvaluator {
+        return when (conditionInfo.type.uppercase()) {
+            "LOCAL_STATE" -> {
+                requireNotNull(conditionInfo.key) { "Condition key is required for LOCAL_STATE" }
+                requireNotNull(conditionInfo.operator) { "Condition operator is required for LOCAL_STATE" }
+                ContextConditionEvaluatorBuilder.createLocalStateCondition(
+                    key = conditionInfo.key,
+                    operator = convertComparisonOperator(conditionInfo.operator),
+                    value = requireNotNull(conditionInfo.value) { "Condition value is required for LOCAL_STATE" }
+                )
+            }
+            "GLOBAL_STATE" -> {
+                requireNotNull(conditionInfo.key) { "Condition key is required for GLOBAL_STATE" }
+                requireNotNull(conditionInfo.operator) { "Condition operator is required for GLOBAL_STATE" }
+                ContextConditionEvaluatorBuilder.createGlobalStateCondition(
+                    key = conditionInfo.key,
+                    operator = convertComparisonOperator(conditionInfo.operator),
+                    value = requireNotNull(conditionInfo.value) { "Condition value is required for GLOBAL_STATE" }
+                )
+            }
+            "EXPRESSION" -> {
+                requireNotNull(conditionInfo.expression) { "Condition expression is required for EXPRESSION" }
+                val exprType = when (conditionInfo.expressionType?.uppercase()) {
+                    "JSON_PATH" -> ExpressionConditionEvaluator.ExpressionType.JSON_PATH
+                    "SIMPLE" -> ExpressionConditionEvaluator.ExpressionType.SIMPLE
+                    "GROOVY" -> ExpressionConditionEvaluator.ExpressionType.GROOVY
+                    else -> ExpressionConditionEvaluator.ExpressionType.SIMPLE
+                }
+                ContextConditionEvaluatorBuilder.createExpression(exprType, conditionInfo.expression)
+            }
+            "COMPOSITE" -> {
+                requireNotNull(conditionInfo.logicalOperator) { "Logical operator is required for COMPOSITE" }
+                requireNotNull(conditionInfo.conditions) { "Sub-conditions are required for COMPOSITE" }
+                ContextConditionEvaluatorBuilder.createComposite(
+                    operator = convertLogicalOperator(conditionInfo.logicalOperator),
+                    *conditionInfo.conditions.map { convertCondition(it) }.toTypedArray()
+                )
+            }
+            else -> throw IllegalArgumentException("Unknown condition type: ${conditionInfo.type}")
+        }
+    }
+    
+    /**
+     * 转换比较操作符
+     */
+    private fun convertComparisonOperator(operator: String): ComparisonOperator {
+        return when (operator.uppercase()) {
+            "EQ", "EQUAL", "==" -> ComparisonOperator.EQ
+            "NE", "NOT_EQUAL", "!=" -> ComparisonOperator.NE
+            "GT", "GREATER_THAN", ">" -> ComparisonOperator.GT
+            "GE", "GREATER_EQUAL", ">=" -> ComparisonOperator.GE
+            "LT", "LESS_THAN", "<" -> ComparisonOperator.LT
+            "LE", "LESS_EQUAL", "<=" -> ComparisonOperator.LE
+            "IN" -> ComparisonOperator.IN
+            "CONTAINS" -> ComparisonOperator.CONTAINS
+            else -> throw IllegalArgumentException("Unknown comparison operator: $operator")
+        }
+    }
+    
+    /**
+     * 转换逻辑操作符
+     */
+    private fun convertLogicalOperator(operator: String): LogicalOperator {
+        return when (operator.uppercase()) {
+            "AND", "&&" -> LogicalOperator.AND
+            "OR", "||" -> LogicalOperator.OR
+            "NOT", "!" -> LogicalOperator.NOT
+            else -> throw IllegalArgumentException("Unknown logical operator: $operator")
+        }
+    }
+    
+    /**
+     * 转换等待策略
+     */
+    private fun convertWaitStrategy(strategy: String): ParallelWaitStrategy {
+        return when (strategy.uppercase()) {
+            "ALL" -> ParallelWaitStrategy.ALL
+            "ANY" -> ParallelWaitStrategy.ANY
+            "N_COUNT", "N" -> ParallelWaitStrategy.N_COUNT
+            else -> ParallelWaitStrategy.ALL
+        }
+    }
+    
+    /**
+     * 转换错误处理策略
+     */
+    private fun convertErrorStrategy(strategy: String): ParallelErrorStrategy {
+        return when (strategy.uppercase()) {
+            "FAIL_ALL", "FAIL" -> ParallelErrorStrategy.FAIL_ALL
+            "IGNORE_FAILURES", "IGNORE" -> ParallelErrorStrategy.IGNORE_FAILURES
+            "TOLERATE_FAILURES", "TOLERATE" -> ParallelErrorStrategy.TOLERATE_FAILURES
+            else -> ParallelErrorStrategy.FAIL_ALL
         }
     }
 }
