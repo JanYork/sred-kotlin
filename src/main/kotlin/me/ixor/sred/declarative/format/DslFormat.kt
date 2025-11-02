@@ -168,53 +168,173 @@ object DslFormat : StateDefinitionFormat {
     }
     
     private fun parseStateLine(line: String): StateInfo {
-        val parts = line.trim().split(":")
-        val id = parts[1].trim()
+        // 支持多种格式：
+        //   - id: state_id
+        //   - id: state_id, name: State Name, type: INITIAL
+        //   - state_id (name: State Name, type: INITIAL, isInitial: true)
+        val trimmed = line.trim().removePrefix("-").trim()
         
-        // 简化的解析，实际应该更复杂
+        var id = ""
+        var name = ""
+        var type = StateType.NORMAL
+        var parentId: String? = null
+        var isInitial = false
+        var isFinal = false
+        var isError = false
+        var description = ""
+        
+        // 提取 id
+        val idMatch = Regex("id:\\s*([^,)]+)").find(trimmed)
+        id = idMatch?.groupValues?.get(1)?.trim() ?: trimmed.split(":")[0].trim()
+        
+        // 提取 name
+        val nameMatch = Regex("name:\\s*([^,)]+)").find(trimmed)
+        name = nameMatch?.groupValues?.get(1)?.trim()?.replace("\"", "")?.replace("'", "")
+            ?: id.replace("_", " ").replaceFirstChar { it.uppercase() }
+        
+        // 提取 type
+        val typeMatch = Regex("type:\\s*([^,)]+)").find(trimmed)
+        val typeStr = typeMatch?.groupValues?.get(1)?.trim()?.uppercase() ?: "NORMAL"
+        type = try {
+            StateType.valueOf(typeStr)
+        } catch (e: Exception) {
+            StateType.NORMAL
+        }
+        
+        // 提取 parentId
+        val parentIdMatch = Regex("parentId:\\s*([^,)]+)").find(trimmed)
+        parentId = parentIdMatch?.groupValues?.get(1)?.trim()
+        
+        // 提取布尔标志
+        isInitial = Regex("isInitial:\\s*true").containsMatchIn(trimmed) || 
+                   id.contains("initial", ignoreCase = true)
+        isFinal = Regex("isFinal:\\s*true").containsMatchIn(trimmed) ||
+                  id.contains("final", ignoreCase = true) || id.contains("completed", ignoreCase = true)
+        isError = Regex("isError:\\s*true").containsMatchIn(trimmed) ||
+                  id.contains("error", ignoreCase = true) || id.contains("failed", ignoreCase = true)
+        
+        // 提取 description
+        val descMatch = Regex("description:\\s*[\"']?([^,\"')]+)[\"']?").find(trimmed)
+        description = descMatch?.groupValues?.get(1)?.trim() ?: ""
+        
         return StateInfo(
             id = id,
-            name = id.replace("_", " ").replaceFirstChar { it.uppercase() },
-            type = StateType.NORMAL,
-            isInitial = id.contains("initial"),
-            isFinal = id.contains("final") || id.contains("completed"),
-            isError = id.contains("error") || id.contains("failed")
+            name = name,
+            type = type,
+            parentId = parentId,
+            isInitial = isInitial,
+            isFinal = isFinal,
+            isError = isError,
+            description = description
         )
     }
     
     private fun parseTransitionLine(line: String): TransitionInfo {
-        val parts = line.trim().split("->")
-        val from = parts[0].trim()
-        val to = parts[1].trim()
+        // 支持多种格式：
+        //   - from -> to
+        //   - from -> to (condition: Success, priority: 1)
+        val trimmed = line.trim().removePrefix("-").trim()
+        
+        // 提取 from 和 to
+        val arrowMatch = Regex("([^->]+)->([^(]+)").find(trimmed)
+        val from = arrowMatch?.groupValues?.get(1)?.trim() ?: trimmed.split("->")[0].trim()
+        val to = arrowMatch?.groupValues?.get(2)?.trim()?.split("(")?.get(0)?.trim()
+            ?: trimmed.split("->")[1].trim().split("(")[0].trim()
+        
+        // 提取 condition
+        val conditionMatch = Regex("condition:\\s*([^,)]+)").find(trimmed)
+        val conditionStr = conditionMatch?.groupValues?.get(1)?.trim()?.uppercase() ?: "SUCCESS"
+        val condition = when (conditionStr) {
+            "SUCCESS" -> TransitionCondition.Success
+            "FAILURE" -> TransitionCondition.Failure
+            else -> TransitionCondition.Custom(conditionStr)
+        }
+        
+        // 提取 priority
+        val priorityMatch = Regex("priority:\\s*(\\d+)").find(trimmed)
+        val priority = priorityMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        
+        // 提取 description
+        val descMatch = Regex("description:\\s*[\"']?([^,\"')]+)[\"']?").find(trimmed)
+        val description = descMatch?.groupValues?.get(1)?.trim() ?: ""
         
         return TransitionInfo(
             from = from,
             to = to,
-            condition = TransitionCondition.Success
+            condition = condition,
+            priority = priority,
+            description = description
         )
     }
     
     private fun parseFunctionLine(line: String): FunctionInfo {
-        val parts = line.trim().split(":")
-        val stateId = parts[1].trim()
+        // 支持多种格式：
+        //   - stateId: state_id
+        //   - stateId: state_id, functionName: handleState, priority: 1
+        val trimmed = line.trim().removePrefix("-").trim()
+        
+        // 提取 stateId
+        val stateIdMatch = Regex("stateId:\\s*([^,]+)").find(trimmed)
+        val stateId = stateIdMatch?.groupValues?.get(1)?.trim()
+            ?: trimmed.split(":")[1].trim().split(",")[0].trim()
+        
+        // 提取 functionName
+        val functionNameMatch = Regex("functionName:\\s*([^,]+)").find(trimmed)
+        val functionName = functionNameMatch?.groupValues?.get(1)?.trim()?.replace("\"", "")?.replace("'", "")
+            ?: "handle${stateId.replace("_", "").replaceFirstChar { it.uppercase() }}"
+        
+        // 提取其他属性
+        val classNameMatch = Regex("className:\\s*([^,]+)").find(trimmed)
+        val className = classNameMatch?.groupValues?.get(1)?.trim()?.replace("\"", "")?.replace("'", "")
+        
+        val descriptionMatch = Regex("description:\\s*[\"']?([^,\"']+)[\"']?").find(trimmed)
+        val description = descriptionMatch?.groupValues?.get(1)?.trim() ?: ""
+        
+        val priorityMatch = Regex("priority:\\s*(\\d+)").find(trimmed)
+        val priority = priorityMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        
+        val timeoutMatch = Regex("timeout:\\s*(\\d+)").find(trimmed)
+        val timeout = timeoutMatch?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+        
+        val retryCountMatch = Regex("retryCount:\\s*(\\d+)").find(trimmed)
+        val retryCount = retryCountMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        
+        val asyncMatch = Regex("async:\\s*(true|false)").find(trimmed)
+        val async = asyncMatch?.groupValues?.get(1)?.toBoolean() ?: false
         
         return FunctionInfo(
             stateId = stateId,
-            functionName = "handle${stateId.replace("_", "").replaceFirstChar { it.uppercase() }}"
+            functionName = functionName,
+            className = className,
+            description = description,
+            priority = priority,
+            timeout = timeout,
+            retryCount = retryCount,
+            async = async
         )
     }
     
     private fun parseMetadataLine(line: String): Pair<String, Any> {
-        val parts = line.trim().split(":", limit = 2)
+        val trimmed = line.trim()
+        val parts = trimmed.split(":", limit = 2)
         val key = parts[0].trim()
-        val value = parts[1].trim()
+        val value = parts.getOrNull(1)?.trim() ?: ""
+        
+        // 移除引号
+        val cleanValue = value.removeSurrounding("\"").removeSurrounding("'")
         
         return key to when {
-            value == "true" -> true
-            value == "false" -> false
-            value.matches(Regex("\\d+")) -> value.toInt()
-            value.matches(Regex("\\d+\\.\\d+")) -> value.toDouble()
-            else -> value
+            cleanValue == "true" -> true
+            cleanValue == "false" -> false
+            cleanValue.matches(Regex("-?\\d+")) -> cleanValue.toInt()
+            cleanValue.matches(Regex("-?\\d+\\.\\d+")) -> cleanValue.toDouble()
+            cleanValue.startsWith("[") && cleanValue.endsWith("]") -> {
+                // 解析数组
+                cleanValue.removeSurrounding("[", "]")
+                    .split(",")
+                    .map { it.trim().removeSurrounding("\"").removeSurrounding("'") }
+            }
+            else -> cleanValue
         }
     }
 }

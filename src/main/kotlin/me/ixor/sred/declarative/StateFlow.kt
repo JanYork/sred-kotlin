@@ -34,6 +34,21 @@ class StateFlow {
     internal val transitions = ConcurrentHashMap<String, MutableList<TransitionDefinition>>()
     internal val functions = ConcurrentHashMap<String, StateFunction>()
     
+    // 流程级别配置
+    var pauseable: Boolean = false           // 流程是否支持长时间停顿
+    var defaultTimeout: Long? = null         // 流程默认超时时间（秒）
+    var autoResume: Boolean = false          // 是否自动恢复暂停的流程
+    
+    /**
+     * 超时操作配置
+     */
+    data class TimeoutAction(
+        val type: String,  // "transition" 或 "event"
+        val targetState: String? = null,  // type="transition" 时使用
+        val eventType: String? = null,    // type="event" 时使用
+        val eventName: String? = null     // type="event" 时使用
+    )
+    
     /**
      * 状态定义
      */
@@ -44,7 +59,12 @@ class StateFlow {
         val parentId: String? = null,
         val isInitial: Boolean = false,
         val isFinal: Boolean = false,
-        val isError: Boolean = false
+        val isError: Boolean = false,
+        // 状态配置：长时间停顿和超时
+        val pauseable: Boolean = false,      // 是否支持长时间停顿
+        val timeout: Long? = null,           // 超时时间（秒），null 表示不超时，-1 表示无限久
+        val pauseOnEnter: Boolean = false,   // 进入此状态时自动暂停
+        val timeoutAction: TimeoutAction? = null  // 超时后的操作
     )
     
     /**
@@ -87,9 +107,30 @@ class StateFlow {
         parentId: String? = null,
         isInitial: Boolean = false,
         isFinal: Boolean = false,
-        isError: Boolean = false
+        isError: Boolean = false,
+        pauseable: Boolean? = null,          // null 表示继承流程配置
+        timeout: Long? = null,               // 超时时间（秒），null 表示使用流程默认值，-1 表示无限久
+        pauseOnEnter: Boolean = false,       // 进入此状态时自动暂停
+        timeoutAction: TimeoutAction? = null  // 超时后的操作
     ): StateFlow {
-        states[id] = StateDefinition(id, name, type, parentId, isInitial, isFinal, isError)
+        val statePauseable = pauseable ?: this.pauseable
+        // timeout 为 null 时使用流程级别的 defaultTimeout
+        val stateTimeout = timeout ?: defaultTimeout
+        states[id] = StateDefinition(id, name, type, parentId, isInitial, isFinal, isError, statePauseable, stateTimeout, pauseOnEnter, timeoutAction)
+        return this
+    }
+    
+    /**
+     * 配置流程级别设置
+     */
+    fun config(
+        pauseable: Boolean = false,
+        defaultTimeout: Long? = null,
+        autoResume: Boolean = false
+    ): StateFlow {
+        this.pauseable = pauseable
+        this.defaultTimeout = defaultTimeout
+        this.autoResume = autoResume
         return this
     }
     
@@ -183,6 +224,11 @@ class StateMachine(private val flow: StateFlow) {
      * 启动状态机实例
      */
     suspend fun start(instanceId: String, initialContext: StateContext = StateContextFactory.create()): StateMachineInstance {
+        // 如果实例已存在（可能从持久化恢复），先恢复状态
+        if (currentStates.containsKey(instanceId)) {
+            return StateMachineInstance(this, instanceId)
+        }
+        
         // 确保初始上下文中设置了初始状态ID
         val initialStateId = initialContext.currentStateId ?: flow.states.values.firstOrNull { it.isInitial }?.id
         val contextWithState = if (initialStateId != null && initialContext.currentStateId == null) {
@@ -193,10 +239,26 @@ class StateMachine(private val flow: StateFlow) {
         val initialState = flow.states.values.find { it.isInitial }
             ?: throw IllegalStateException("No initial state defined")
         
-        currentStates[instanceId] = initialState.id
-        contexts[instanceId] = contextWithState.copy(currentStateId = initialState.id)
+        // 如果上下文中已有状态ID（从持久化恢复），使用该状态
+        val stateId = contextWithState.currentStateId ?: initialState.id
+        currentStates[instanceId] = stateId
+        contexts[instanceId] = contextWithState.copy(currentStateId = stateId)
         
         return StateMachineInstance(this, instanceId)
+    }
+    
+    /**
+     * 恢复已存在的状态机实例（从持久化存储）
+     * 用于支持无限长时间停顿后的恢复
+     * 即使服务器重启也能恢复实例状态
+     */
+    fun restore(instanceId: String, context: StateContext) {
+        // 如果实例已存在，更新其状态（可能状态已变更）
+        val stateId = context.currentStateId ?: flow.states.values.firstOrNull { it.isInitial }?.id
+            ?: throw IllegalStateException("No state ID in context and no initial state defined")
+        
+        currentStates[instanceId] = stateId
+        contexts[instanceId] = context
     }
     
     /**
@@ -240,6 +302,29 @@ class StateMachine(private val flow: StateFlow) {
     }
     
     /**
+     * 直接转移状态（不触发状态函数，用于超时等特殊情况）
+     * 
+     * @param instanceId 实例ID
+     * @param targetStateId 目标状态ID
+     * @param reason 转移原因（用于日志和审计）
+     * @throws IllegalStateException 如果实例不存在或目标状态不存在
+     */
+    fun forceTransition(instanceId: String, targetStateId: String, reason: String = "force") {
+        // 验证目标状态存在
+        val targetState = flow.states[targetStateId]
+            ?: throw IllegalStateException("Target state not found: $targetStateId")
+        
+        val currentStateId = currentStates[instanceId] 
+            ?: throw IllegalStateException("Instance not found: $instanceId")
+        val context = contexts[instanceId] 
+            ?: throw IllegalStateException("Context not found: $instanceId")
+        
+        // 直接更新状态
+        currentStates[instanceId] = targetStateId
+        contexts[instanceId] = context.copy(currentStateId = targetStateId)
+    }
+    
+    /**
      * 获取当前状态
      */
     fun getCurrentState(instanceId: String): String? = currentStates[instanceId]
@@ -248,6 +333,16 @@ class StateMachine(private val flow: StateFlow) {
      * 获取上下文
      */
     fun getContext(instanceId: String): StateContext? = contexts[instanceId]
+    
+    /**
+     * 获取状态定义
+     */
+    fun getStateDefinition(stateId: String): StateFlow.StateDefinition? = flow.states[stateId]
+    
+    /**
+     * 获取流程配置
+     */
+    fun getFlow(): StateFlow = flow
     
     /**
      * 查找下一个状态
@@ -281,6 +376,10 @@ class StateMachineInstance(
     private val machine: StateMachine,
     private val instanceId: String
 ) {
+    /**
+     * 获取关联的状态机
+     */
+    fun getMachine(): StateMachine = machine
     
     /**
      * 处理事件
@@ -300,50 +399,3 @@ class StateMachineInstance(
     fun getContext(): StateContext? = machine.getContext(instanceId)
 }
 
-/**
- * 状态流构建器
- */
-object StateFlowBuilder {
-    
-    /**
-     * 创建用户注册状态流
-     */
-    fun createUserRegistrationFlow(): StateFlow {
-        val flow = StateFlow()
-        
-        // 主状态定义
-        flow.state("user_unregistered", "用户未注册", StateFlow.StateType.INITIAL, isInitial = true)
-        flow.state("user_registering", "用户正在注册", StateFlow.StateType.NORMAL)
-        flow.state("user_registered", "用户注册成功", StateFlow.StateType.FINAL, isFinal = true)
-        flow.state("user_registration_failed", "用户注册失败", StateFlow.StateType.ERROR, isError = true)
-        
-        // 子状态定义（注册过程中的子状态）
-        flow.state("registration_not_submitted", "未提交注册", StateFlow.StateType.INITIAL, "user_registering", isInitial = true)
-        flow.state("registration_validating", "参数校验", StateFlow.StateType.NORMAL, "user_registering")
-        flow.state("registration_storing", "存储用户信息", StateFlow.StateType.NORMAL, "user_registering")
-        flow.state("registration_completed", "注册完成", StateFlow.StateType.FINAL, "user_registering", isFinal = true)
-        
-        // 邮件发送子状态（注册成功后的子状态）
-        flow.state("email_sending", "发送邮件", StateFlow.StateType.NORMAL, "user_registered")
-        flow.state("email_sent", "邮件已发送", StateFlow.StateType.FINAL, "user_registered", isFinal = true)
-        
-        // 主状态转移
-        flow.transition("user_unregistered", "user_registering", StateFlow.TransitionCondition.Success)
-        flow.transition("user_registering", "user_registered", StateFlow.TransitionCondition.Success)
-        flow.transition("user_registering", "user_registration_failed", StateFlow.TransitionCondition.Failure)
-        
-        // 子状态转移
-        flow.transition("registration_not_submitted", "registration_validating", StateFlow.TransitionCondition.Success)
-        flow.transition("registration_validating", "registration_storing", StateFlow.TransitionCondition.Success)
-        flow.transition("registration_validating", "user_registration_failed", StateFlow.TransitionCondition.Failure)
-        flow.transition("registration_storing", "registration_completed", StateFlow.TransitionCondition.Success)
-        flow.transition("registration_storing", "user_registration_failed", StateFlow.TransitionCondition.Failure)
-        flow.transition("registration_completed", "user_registered", StateFlow.TransitionCondition.Success)
-        
-        // 邮件发送转移
-        flow.transition("user_registered", "email_sending", StateFlow.TransitionCondition.Success)
-        flow.transition("email_sending", "email_sent", StateFlow.TransitionCondition.Success)
-        
-        return flow
-    }
-}

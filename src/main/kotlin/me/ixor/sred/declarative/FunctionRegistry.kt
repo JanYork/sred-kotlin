@@ -1,20 +1,12 @@
 package me.ixor.sred.declarative
 
 import me.ixor.sred.core.*
+import me.ixor.sred.declarative.annotations.StateHandler
 import kotlinx.coroutines.*
+import kotlin.coroutines.CoroutineContext
 import kotlin.reflect.KFunction
 import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.full.callSuspend
-
-/**
- * 函数注册注解
- */
-@Target(AnnotationTarget.FUNCTION)
-@Retention(AnnotationRetention.RUNTIME)
-annotation class StateHandler(
-    val stateId: String,
-    val description: String = ""
-)
 
 /**
  * 声明式函数注册器
@@ -68,90 +60,8 @@ object FunctionRegistry {
 }
 
 /**
- * 用户注册服务
- * 演示声明式函数绑定
- */
-class UserRegistrationService {
-    
-    private val log = logger<UserRegistrationService>()
-    
-    @StateHandler("registration_validating", "用户参数校验")
-    suspend fun validateUser(context: StateContext): StateResult {
-        val email = context.getLocalState<String>("email")
-        val password = context.getLocalState<String>("password")
-        val username = context.getLocalState<String>("username")
-        
-        log.info { "正在校验用户参数..." }
-        delay(100) // 模拟校验时间
-        
-        return when {
-            email.isNullOrBlank() -> StateResult(false, error = IllegalArgumentException("邮箱不能为空"))
-            !email.contains("@") -> StateResult(false, error = IllegalArgumentException("邮箱格式不正确"))
-            password.isNullOrBlank() -> StateResult(false, error = IllegalArgumentException("密码不能为空"))
-            password.length < 6 -> StateResult(false, error = IllegalArgumentException("密码长度不能少于6位"))
-            username.isNullOrBlank() -> StateResult(false, error = IllegalArgumentException("用户名不能为空"))
-            else -> {
-                log.info { "用户参数校验通过" }
-                StateResult(true, mapOf(
-                    "validatedEmail" to email,
-                    "validatedPassword" to password,
-                    "validatedUsername" to username
-                ))
-            }
-        }
-    }
-    
-    @StateHandler("registration_storing", "存储用户信息")
-    suspend fun storeUser(context: StateContext): StateResult {
-        val email = context.getLocalState<String>("validatedEmail")
-        val password = context.getLocalState<String>("validatedPassword")
-        val username = context.getLocalState<String>("validatedUsername")
-        
-        log.info { "正在存储用户信息..." }
-        delay(200) // 模拟存储时间
-        
-        return try {
-            // 模拟存储操作
-            val userId = "user_${System.currentTimeMillis()}"
-            log.info { "用户信息存储成功，用户ID: $userId" }
-            StateResult(true, mapOf(
-                "userId" to userId,
-                "storedEmail" to (email ?: ""),
-                "storedUsername" to (username ?: "")
-            ))
-        } catch (e: Exception) {
-            log.error(e) { "用户信息存储失败: ${e.message}" }
-            StateResult(false, error = e)
-        }
-    }
-    
-    @StateHandler("email_sending", "发送验证邮件")
-    suspend fun sendVerificationEmail(context: StateContext): StateResult {
-        val email = context.getLocalStateOrDefault<String>("storedEmail", "")
-        val userId = context.getLocalStateOrDefault<String>("userId", "")
-        
-        log.info { "正在发送验证邮件到: $email" }
-        
-        // 异步发送邮件，不等待结果
-        GlobalScope.launch {
-            try {
-                delay(1000) // 模拟邮件发送时间
-                log.info { "验证邮件发送成功" }
-            } catch (e: Exception) {
-                log.error(e) { "验证邮件发送失败: ${e.message}" }
-            }
-        }
-        
-        // 立即返回成功，不等待邮件发送完成
-        return StateResult(true, mapOf(
-            "emailSent" to true,
-            "verificationToken" to "token_${System.currentTimeMillis()}"
-        ))
-    }
-}
-
-/**
  * 状态流构建器扩展
+ * 自动绑定带注解的函数到状态流
  */
 fun StateFlow.bindFunctions(service: Any) {
     FunctionRegistry.registerFunctions(service)

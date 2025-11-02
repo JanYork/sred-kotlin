@@ -1,7 +1,9 @@
 package me.ixor.sred.core
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -77,11 +79,17 @@ class StateLockImpl : StateLock {
         val entityLocks = locks.getOrPut(entityId) { ConcurrentHashMap() }
         val lock = entityLocks.getOrPut(stateId) { Mutex() }
         
+        // 使用 withTimeoutOrNull 实现超时机制
+        // Mutex.withLock 会等待直到获取锁或协程被取消
+        // withTimeoutOrNull 确保在超时时间内无法获取锁时返回 null
         return try {
-            lock.withLock {
-                true
-            }
-        } catch (e: Exception) {
+            withTimeoutOrNull(timeout.toMillis()) {
+                lock.withLock {
+                    true  // 成功获取锁
+                }
+            } ?: false  // 超时返回 false
+        } catch (e: CancellationException) {
+            // 如果协程被取消，返回 false
             false
         }
     }
@@ -136,13 +144,19 @@ class StateLockWithTimeout : StateLock {
     ): Boolean {
         val lock = getOrCreateLock(entityId, stateId)
         
+        // 使用 withTimeoutOrNull 实现超时机制
+        // Mutex.withLock 会等待直到获取锁或协程被取消
+        // withTimeoutOrNull 确保在超时时间内无法获取锁时返回 null
         return try {
-            lock.withLock {
-                // 记录锁定时间
-                lockTimestamps.getOrPut(entityId) { ConcurrentHashMap() }[stateId] = Instant.now()
-                true
-            }
-        } catch (e: Exception) {
+            withTimeoutOrNull(timeout.toMillis()) {
+                lock.withLock {
+                    // 记录锁定时间
+                    lockTimestamps.getOrPut(entityId) { ConcurrentHashMap() }[stateId] = Instant.now()
+                    true  // 成功获取锁
+                }
+            } ?: false  // 超时返回 false
+        } catch (e: CancellationException) {
+            // 如果协程被取消，返回 false
             false
         }
     }

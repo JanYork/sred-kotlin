@@ -269,7 +269,11 @@ class StateOrchestratorImpl(
         transitionRegistry.unregisterTransition(transitionId)
     }
     
-    override fun getStatistics(): OrchestratorStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): OrchestratorStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking { statistics.getStatistics() }
+    }
     
     private fun createEventListener(): EventListener {
         return object : EventListener {

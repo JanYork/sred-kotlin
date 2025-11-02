@@ -109,29 +109,6 @@ data class CommandResult(
 )
 
 /**
- * 用户注册命令
+ * 注意：业务相关的命令类应在业务层定义，不应在框架层
+ * 框架只提供通用的 Command 和 CommandHandler 类
  */
-data class UserRegistrationCommand(
-    val email: String,
-    val password: String,
-    val username: String
-) {
-    fun toCommand(): Command {
-        return Command(
-            type = "user_registration",
-            data = mapOf(
-                "email" to email,
-                "password" to password,
-                "username" to username
-            ),
-            context = StateContextFactory.create(
-                localState = mapOf(
-                    "email" to email,
-                    "password" to password,
-                    "username" to username,
-                    "timestamp" to java.time.Instant.now()
-                )
-            )
-        )
-    }
-}

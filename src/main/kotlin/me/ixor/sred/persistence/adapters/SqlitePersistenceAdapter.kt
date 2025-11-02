@@ -4,9 +4,14 @@ import me.ixor.sred.core.*
 import me.ixor.sred.persistence.AbstractPersistenceAdapter
 import me.ixor.sred.persistence.ExtendedStatePersistence
 import me.ixor.sred.persistence.SqlitePersistenceConfig
+import me.ixor.sred.persistence.TransactionManager
+import me.ixor.sred.persistence.SqliteTransactionManager
+import me.ixor.sred.persistence.TransactionId
+import me.ixor.sred.persistence.TransactionContextKey
 import me.ixor.sred.state.StateHistoryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.Closeable
 import java.io.File
 import java.sql.*
@@ -27,8 +32,44 @@ class SqlitePersistenceAdapter(
     @Volatile
     private var closed = false
     
+    // 事务管理器
+    private val transactionManager: TransactionManager by lazy {
+        SqliteTransactionManager {
+            // 创建新连接用于事务
+            val dbFile = File(config.connectionString)
+            val url = "jdbc:sqlite:${dbFile.absolutePath}"
+            val conn = DriverManager.getConnection(url)
+            // 确保表已创建
+            createTables(conn)
+            conn
+        }
+    }
+    
     init {
         // 初始化在initialize方法中进行，支持异步初始化
+    }
+    
+    /**
+     * 获取数据库连接（支持事务上下文）
+     * @param transactionId 可选的事务ID
+     * @return 数据库连接
+     */
+    private suspend fun getConnection(transactionId: TransactionId? = null): Connection {
+        // 如果提供了事务ID，使用事务连接
+        transactionId?.let { txId ->
+            transactionManager.getConnection(txId)?.let { return it }
+            throw PersistenceException("Transaction not found: $txId")
+        }
+        
+        // 尝试从协程上下文获取事务ID
+        coroutineContext.get(TransactionContextKey)?.transactionId?.let { txId ->
+            transactionManager.getConnection(txId)?.let { return it }
+        }
+        
+        // 否则使用默认连接（自动提交）
+        initialize() // 确保已初始化
+        ensureOpen()
+        return connection ?: throw PersistenceException("Connection is null after ensureOpen()")
     }
     
     override suspend fun initialize() = withContext(Dispatchers.IO) {
@@ -43,8 +84,8 @@ class SqlitePersistenceAdapter(
             
             log.debug { "Initializing SQLite connection to: ${dbFile.absolutePath}" }
             
-            connection = DriverManager.getConnection(url).apply {
-                createTables()
+            connection = DriverManager.getConnection(url).also {
+                createTables(it)
             }
             
             log.info { "SQLite connection initialized successfully" }
@@ -57,8 +98,8 @@ class SqlitePersistenceAdapter(
     /**
      * 创建数据表
      */
-    private fun Connection.createTables() {
-        createStatement().use { stmt ->
+    private fun createTables(conn: Connection) {
+        conn.createStatement().use { stmt ->
             // 状态上下文表
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS state_contexts (
@@ -121,12 +162,9 @@ class SqlitePersistenceAdapter(
         }
     }
     
-    override suspend fun saveContext(context: StateContext) {
+    override suspend fun saveContext(context: StateContext, transactionId: TransactionId?) {
         withContext(Dispatchers.IO) {
-            initialize() // 确保已初始化
-            ensureOpen()
-            
-            val conn = connection!!
+            val conn = getConnection(transactionId)
             
             conn.prepareStatement("""
                 INSERT OR REPLACE INTO state_contexts 
@@ -145,11 +183,8 @@ class SqlitePersistenceAdapter(
         }
     }
     
-    override suspend fun loadContext(contextId: ContextId): StateContext? = withContext(Dispatchers.IO) {
-        initialize() // 确保已初始化
-        ensureOpen()
-        
-        val conn = connection!!
+    override suspend fun loadContext(contextId: ContextId, transactionId: TransactionId?): StateContext? = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
         
         conn.prepareStatement("""
             SELECT id, current_state_id, created_at, last_updated_at, local_state, global_state, metadata
@@ -175,13 +210,17 @@ class SqlitePersistenceAdapter(
         }
     }
     
-    override suspend fun deleteContext(contextId: ContextId) = withContext(Dispatchers.IO) {
-        initialize() // 确保已初始化
-        ensureOpen()
+    override suspend fun deleteContext(contextId: ContextId, transactionId: TransactionId?) = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
         
-        val conn = connection!!
+        // 如果没有事务，需要手动管理事务
+        val isInTransaction = transactionId != null || coroutineContext.get(TransactionContextKey) != null
+        val originalAutoCommit = conn.autoCommit
         
-        conn.autoCommit = false
+        if (!isInTransaction) {
+            conn.autoCommit = false
+        }
+        
         try {
             // 删除关联的事件历史
             conn.prepareStatement("DELETE FROM event_history WHERE context_id = ?").use { stmt ->
@@ -201,20 +240,23 @@ class SqlitePersistenceAdapter(
                 stmt.executeUpdate()
             }
             
-            conn.commit()
+            if (!isInTransaction) {
+                conn.commit()
+            }
         } catch (e: Exception) {
-            conn.rollback()
+            if (!isInTransaction) {
+                conn.rollback()
+            }
             throw e
         } finally {
-            conn.autoCommit = true
+            if (!isInTransaction) {
+                conn.autoCommit = originalAutoCommit
+            }
         }
     }
     
-    override suspend fun listContextIds(): List<ContextId> = withContext(Dispatchers.IO) {
-        initialize() // 确保已初始化
-        ensureOpen()
-        
-        val conn = connection!!
+    override suspend fun listContextIds(transactionId: TransactionId?): List<ContextId> = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
         
         conn.prepareStatement("SELECT id FROM state_contexts ORDER BY last_updated_at DESC").use { stmt ->
             stmt.executeQuery().use { rs ->
@@ -228,9 +270,13 @@ class SqlitePersistenceAdapter(
     }
     
     override suspend fun loadRecentEvents(contextId: ContextId, limit: Int): List<Event> {
-        val conn = connection ?: return emptyList()
-        
         return withContext(Dispatchers.IO) {
+            // loadRecentEvents 通常是从已加载的上下文中调用，使用默认连接
+            // 如果需要事务支持，可以扩展接口添加 transactionId 参数
+            val conn = connection ?: run {
+                initialize()
+                connection ?: return@withContext emptyList()
+            }
             conn.prepareStatement("""
                 SELECT event_id, event_type, event_name, event_data, timestamp
                 FROM event_history
@@ -265,12 +311,9 @@ class SqlitePersistenceAdapter(
         }
     }
     
-    override suspend fun saveEvent(contextId: ContextId, event: Event) {
+    override suspend fun saveEvent(contextId: ContextId, event: Event, transactionId: TransactionId?) {
         withContext(Dispatchers.IO) {
-            initialize() // 确保已初始化
-            ensureOpen()
-            
-            val conn = connection!!
+            val conn = getConnection(transactionId)
             
             val eventData = buildEventData(event)
             
@@ -295,13 +338,11 @@ class SqlitePersistenceAdapter(
         fromStateId: StateId?,
         toStateId: StateId,
         eventId: EventId?,
-        timestamp: Instant
+        timestamp: Instant,
+        transactionId: TransactionId?
     ) {
         withContext(Dispatchers.IO) {
-            initialize() // 确保已初始化
-            ensureOpen()
-            
-            val conn = connection!!
+            val conn = getConnection(transactionId)
             
             conn.prepareStatement("""
                 INSERT INTO state_history 
@@ -318,11 +359,8 @@ class SqlitePersistenceAdapter(
         }
     }
     
-    override suspend fun getStateHistory(contextId: ContextId): List<StateHistoryEntry> = withContext(Dispatchers.IO) {
-        initialize() // 确保已初始化
-        ensureOpen()
-        
-        val conn = connection!!
+    override suspend fun getStateHistory(contextId: ContextId, transactionId: TransactionId?): List<StateHistoryEntry> = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
         
         conn.prepareStatement("""
             SELECT from_state_id, to_state_id, event_id, timestamp
@@ -352,18 +390,80 @@ class SqlitePersistenceAdapter(
         }
     }
     
+    /**
+     * 查询所有暂停的实例ID
+     * 通过查询 metadata JSON 中包含 _pausedAt 键的实例
+     */
+    override suspend fun findPausedInstances(transactionId: TransactionId?): List<ContextId> = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        // SQLite 支持 JSON1 扩展，可以使用 json_extract 函数
+        // 如果 metadata 包含 _pausedAt 键，则认为是暂停的实例
+        val pausedInstances = mutableListOf<ContextId>()
+        
+        try {
+            conn.prepareStatement("""
+                SELECT id 
+                FROM state_contexts 
+                WHERE metadata IS NOT NULL 
+                AND metadata != '{}'
+                AND json_extract(metadata, '$._pausedAt') IS NOT NULL
+            """.trimIndent()).use { stmt ->
+                stmt.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        pausedInstances.add(rs.getString("id"))
+                    }
+                }
+            }
+        } catch (e: SQLException) {
+            // 如果 JSON1 扩展不可用，回退到加载所有上下文并过滤
+            log.warn(e) { "JSON1 extension not available, falling back to loading all contexts" }
+            
+            conn.prepareStatement("SELECT id, metadata FROM state_contexts WHERE metadata IS NOT NULL").use { stmt ->
+                stmt.executeQuery().use { rs ->
+                    while (rs.next()) {
+                        val id = rs.getString("id")
+                        val metadataJson = rs.getString("metadata")
+                        if (metadataJson != null && metadataJson.contains("\"_pausedAt\"")) {
+                            pausedInstances.add(id)
+                        }
+                    }
+                }
+            }
+        }
+        
+        pausedInstances
+    }
+    
     override fun close() {
+        // 使用 @Volatile 的 closed 标志进行双重检查锁定（线程安全）
         if (closed) return
         
         synchronized(this) {
+            // 再次检查，防止多线程环境下的重复关闭
             if (closed) return
             closed = true
             
             try {
+                // 关闭所有活跃的事务
+                kotlinx.coroutines.runBlocking {
+                    try {
+                        (transactionManager as? SqliteTransactionManager)?.closeAll()
+                    } catch (e: Exception) {
+                        log.warn(e) { "Error closing transactions" }
+                    }
+                }
+                
                 val conn = connection
                 if (conn != null && !conn.isClosed) {
-                    conn.close()
-                    log.debug { "SQLite connection closed" }
+                    // 先关闭所有活跃的 Statement
+                    try {
+                        // SQLite JDBC 驱动会自动关闭关联的 Statement，但显式关闭更安全
+                        conn.close()
+                        log.debug { "SQLite connection closed" }
+                    } catch (e: SQLException) {
+                        log.warn(e) { "Error closing SQLite connection (non-critical)" }
+                    }
                 }
             } catch (e: Exception) {
                 log.error(e) { "Error closing SQLite connection" }

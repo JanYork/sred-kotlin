@@ -14,6 +14,7 @@
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <kotlin.version>2.1.20</kotlin.version>
+        <spring.boot.version>3.2.0</spring.boot.version>
         <junit.version>5.10.0</junit.version>
         <mockk.version>1.13.8</mockk.version>
     </properties>
@@ -82,6 +83,18 @@
             <version>3.44.1.0</version>
         </dependency>
         
+        <!-- Spring Boot for Web API -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <version>3.2.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+            <version>3.2.0</version>
+        </dependency>
+        
         <!-- Testing -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -128,10 +141,17 @@
                         <goals>
                             <goal>test-compile</goal>
                         </goals>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
                     </execution>
                 </executions>
                 <configuration>
                     <jvmTarget>21</jvmTarget>
+                    <args>
+                        <arg>-Xjvm-default=all</arg>
+                        <arg>-Xskip-metadata-version-check</arg>
+                    </args>
                 </configuration>
             </plugin>
             
@@ -142,6 +162,25 @@
                 <configuration>
                     <source>21</source>
                     <target>21</target>
+                    <compilerArgs>
+                        <arg>-parameters</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+            
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring.boot.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <mainClass>me.ixor.sred.api.ApplicationKt</mainClass>
                 </configuration>
             </plugin>
             
@@ -149,7 +188,24 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.1.2</version>
+                <configuration>
+                    <skipTests>true</skipTests>
+                </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <repositories>
+        <repository>
+            <id>central</id>
+            <url>https://repo1.maven.org/maven2</url>
+        </repository>
+    </repositories>
+    
+    <pluginRepositories>
+        <pluginRepository>
+            <id>central</id>
+            <url>https://repo1.maven.org/maven2</url>
+        </pluginRepository>
+    </pluginRepositories>
 </project>

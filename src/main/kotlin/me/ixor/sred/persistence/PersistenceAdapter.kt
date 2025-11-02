@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import java.time.Instant
+import kotlin.coroutines.coroutineContext
 
 /**
  * 持久化适配器配置接口
@@ -197,24 +198,43 @@ abstract class AbstractPersistenceAdapter(
 interface ExtendedStatePersistence : StatePersistence {
     /**
      * 保存事件到历史
+     * @param contextId 上下文ID
+     * @param event 事件
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun saveEvent(contextId: ContextId, event: Event)
+    suspend fun saveEvent(contextId: ContextId, event: Event, transactionId: TransactionId? = null)
     
     /**
      * 保存状态历史
+     * @param contextId 上下文ID
+     * @param fromStateId 源状态ID
+     * @param toStateId 目标状态ID
+     * @param eventId 事件ID
+     * @param timestamp 时间戳
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
     suspend fun saveStateHistory(
         contextId: ContextId,
         fromStateId: StateId?,
         toStateId: StateId,
         eventId: EventId?,
-        timestamp: Instant = Instant.now()
+        timestamp: Instant = Instant.now(),
+        transactionId: TransactionId? = null
     )
     
     /**
      * 获取状态历史
+     * @param contextId 上下文ID
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun getStateHistory(contextId: ContextId): List<StateHistoryEntry>
+    suspend fun getStateHistory(contextId: ContextId, transactionId: TransactionId? = null): List<StateHistoryEntry>
+    
+    /**
+     * 查询所有暂停的实例ID
+     * 返回所有 metadata 中包含 _pausedAt 标记的实例ID列表
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
+     */
+    suspend fun findPausedInstances(transactionId: TransactionId? = null): List<ContextId>
 }
 
 /**

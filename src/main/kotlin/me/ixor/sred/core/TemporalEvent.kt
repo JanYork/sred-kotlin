@@ -84,6 +84,7 @@ data class DeferredEvent(
 
 /**
  * 周期事件 - 按固定周期重复执行
+ * 使用不可变设计，每次执行后返回新实例
  */
 data class PeriodicEvent(
     private val baseEvent: Event,
@@ -91,7 +92,7 @@ data class PeriodicEvent(
     val startTime: Instant = Instant.now(),
     val endTime: Instant? = null,
     override val temporalType: EventTemporalType = EventTemporalType.PERIODIC,
-    private var lastExecutionTime: Instant? = null
+    val lastExecutionTime: Instant? = null  // 改为不可变的 val
 ) : TemporalEvent, Event by baseEvent {
     
     override val scheduledTime: Instant? = null
@@ -121,7 +122,7 @@ data class PeriodicEvent(
     }
     
     /**
-     * 记录执行时间
+     * 记录执行时间，返回新的实例
      */
     fun recordExecution(time: Instant): PeriodicEvent {
         return this.copy(lastExecutionTime = time)

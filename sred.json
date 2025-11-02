@@ -2,6 +2,11 @@
   "name": "转账流程",
   "description": "用户A向用户B转账的状态流程",
   "version": "1.0.0",
+  "config": {
+    "pauseable": false,
+    "defaultTimeout": 300,
+    "autoResume": false
+  },
   "states": [
     {
       "id": "transfer_initiated",

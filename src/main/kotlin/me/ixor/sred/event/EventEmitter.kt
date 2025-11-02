@@ -99,6 +99,7 @@ abstract class AbstractEventEmitter(
 ) : EventEmitter {
     private val statistics = EmitterStatisticsImpl()
     private var isRunning = false
+    protected var emitterScope: CoroutineScope? = null  // 统一的协程作用域
     
     override suspend fun emit(event: Event) {
         if (!enabled || !isRunning) return
@@ -154,15 +155,22 @@ abstract class AbstractEventEmitter(
     
     override suspend fun start() {
         isRunning = true
+        emitterScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
         onStart()
     }
     
     override suspend fun stop() {
         isRunning = false
+        emitterScope?.cancel()
         onStop()
+        emitterScope = null
     }
     
-    override fun getStatistics(): EmitterStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): EmitterStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking { statistics.getStatistics() }
+    }
     
     /**
      * 实际发射事件的实现
@@ -215,11 +223,14 @@ class ScheduledEmitter(
     }
     
     override suspend fun onStart() {
-        scheduledJob = CoroutineScope(Dispatchers.Default).launch {
+        val scope = emitterScope ?: return
+        scheduledJob = scope.launch {
             while (isActive) {
                 try {
                     val event = eventFactory()
                     emit(event)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     // Log error but continue
                 }
@@ -231,6 +242,7 @@ class ScheduledEmitter(
     override suspend fun onStop() {
         scheduledJob?.cancel()
         scheduledJob?.join()
+        scheduledJob = null
     }
 }
 

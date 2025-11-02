@@ -189,8 +189,13 @@ class EnhancedStateOrchestrator(
             }
             EventTemporalType.ASYNCHRONOUS -> {
                 // 异步事件，在后台处理
-                CoroutineScope(Dispatchers.Default).launch {
-                    processEvent(event)
+                // 使用状态管理器的协程作用域（如果可用）或创建新的
+                CoroutineScope(Dispatchers.Default + SupervisorJob()).launch {
+                    try {
+                        processEvent(event)
+                    } catch (e: Exception) {
+                        // 异步处理中的错误已被记录
+                    }
                 }
                 OrchestrationResult(
                     success = true,
@@ -240,7 +245,11 @@ class EnhancedStateOrchestrator(
         transitionRegistry.unregisterTransition(transitionId)
     }
     
-    override fun getStatistics(): OrchestratorStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): OrchestratorStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking { statistics.getStatistics() }
+    }
     
     /**
      * 获取时间事件调度器

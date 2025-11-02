@@ -1,10 +1,7 @@
-
-
-
-
 package me.ixor.sred.state
 
 import me.ixor.sred.core.*
+import me.ixor.sred.persistence.TransactionId
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -97,23 +94,30 @@ interface StateManager {
 interface StatePersistence {
     /**
      * 保存状态上下文
+     * @param context 状态上下文
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun saveContext(context: StateContext)
+    suspend fun saveContext(context: StateContext, transactionId: TransactionId? = null)
     
     /**
      * 加载状态上下文
+     * @param contextId 上下文ID
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun loadContext(contextId: ContextId): StateContext?
+    suspend fun loadContext(contextId: ContextId, transactionId: TransactionId? = null): StateContext?
     
     /**
      * 删除状态上下文
+     * @param contextId 上下文ID
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun deleteContext(contextId: ContextId)
+    suspend fun deleteContext(contextId: ContextId, transactionId: TransactionId? = null)
     
     /**
      * 列出所有上下文ID
+     * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
-    suspend fun listContextIds(): List<ContextId>
+    suspend fun listContextIds(transactionId: TransactionId? = null): List<ContextId>
 }
 
 /**
@@ -310,28 +314,37 @@ class StateManagerImpl(
         return stateHistory.toList()
     }
     
-    override fun getStatistics(): StateManagerStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): StateManagerStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking { statistics.getStatistics() }
+    }
 }
 
 /**
  * 内存状态持久化实现
+ * 注意：内存实现不支持事务，transactionId 参数会被忽略
  */
 class InMemoryStatePersistence : StatePersistence {
     private val contexts = ConcurrentHashMap<ContextId, StateContext>()
     
-    override suspend fun saveContext(context: StateContext) {
+    override suspend fun saveContext(context: StateContext, transactionId: TransactionId?) {
+        // 内存实现不支持事务，直接保存
         contexts[context.id] = context
     }
     
-    override suspend fun loadContext(contextId: ContextId): StateContext? {
+    override suspend fun loadContext(contextId: ContextId, transactionId: TransactionId?): StateContext? {
+        // 内存实现不支持事务，直接加载
         return contexts[contextId]
     }
     
-    override suspend fun deleteContext(contextId: ContextId) {
+    override suspend fun deleteContext(contextId: ContextId, transactionId: TransactionId?) {
+        // 内存实现不支持事务，直接删除
         contexts.remove(contextId)
     }
     
-    override suspend fun listContextIds(): List<ContextId> {
+    override suspend fun listContextIds(transactionId: TransactionId?): List<ContextId> {
+        // 内存实现不支持事务，直接返回
         return contexts.keys.toList()
     }
 }

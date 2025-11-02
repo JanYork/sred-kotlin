@@ -118,6 +118,7 @@ class EventBusImpl(
     private val mutex = Mutex()
     private var isRunning = false
     private var processingJob: Job? = null
+    private var processingScope: CoroutineScope? = null  // 统一的协程作用域
     
     override suspend fun publish(event: Event) {
         if (!isRunning) {
@@ -150,14 +151,21 @@ class EventBusImpl(
         subscriptions[subscription.eventType]?.remove(subscription)
     }
     
-    override fun getStatistics(): EventBusStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): EventBusStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        // 如果需要高性能，可以考虑将接口改为 suspend 函数
+        return runBlocking { statistics.getStatistics() }
+    }
     
     override suspend fun start() {
         mutex.withLock {
             if (isRunning) return
             
             isRunning = true
-            processingJob = CoroutineScope(Dispatchers.Default).launch {
+            // 创建统一的协程作用域
+            processingScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            processingJob = processingScope!!.launch {
                 processEvents()
             }
         }
@@ -168,28 +176,53 @@ class EventBusImpl(
             if (!isRunning) return
             
             isRunning = false
+            
+            // 关闭 channel（这会停止接收新事件）
             eventChannel.close()
-            processingJob?.cancel()
+            
+            // 取消处理任务和作用域
+            processingScope?.cancel()
+            
+            // 等待处理任务完成（但不等待未完成的事件）
             processingJob?.join()
+            
+            processingScope = null
+            processingJob = null
         }
     }
     
     private suspend fun processEvents() {
         val semaphore = kotlinx.coroutines.sync.Semaphore(maxConcurrency)
+        val scope = processingScope ?: return
         
         try {
+            // 使用 consumeEach 或 for 循环处理事件
+            // 当 channel 关闭时，for 循环会正常退出
             for (event in eventChannel) {
                 semaphore.acquire()
-                CoroutineScope(Dispatchers.Default).launch {
+                scope.launch {
                     try {
                         processEvent(event)
+                    } catch (e: CancellationException) {
+                        // 取消异常，重新抛出以便协程正确处理
+                        throw e
+                    } catch (e: Exception) {
+                        // 记录错误但继续处理
+                        statistics.incrementError()
                     } finally {
                         semaphore.release()
                     }
                 }
             }
+        } catch (e: CancellationException) {
+            // 任务被取消，正常退出
+            throw e
         } catch (e: Exception) {
-            // Channel closed or other error
+            // Channel 关闭时会抛出 ClosedReceiveChannelException，这是正常的
+            // 其他异常记录日志
+            if (e !is kotlinx.coroutines.channels.ClosedReceiveChannelException) {
+                // 记录非预期的错误
+            }
         }
     }
     

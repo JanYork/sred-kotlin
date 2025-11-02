@@ -92,6 +92,7 @@ class TemporalEventSchedulerImpl(
     private val mutex = Mutex()
     private var isRunning = false
     private var schedulerJob: Job? = null
+    private var schedulerScope: CoroutineScope? = null  // 统一的协程作用域
     
     private var executedDeferredCount = 0L
     private var executedPeriodicCount = 0L
@@ -113,7 +114,7 @@ class TemporalEventSchedulerImpl(
         val period: Duration,
         val startTime: Instant,
         val endTime: Instant?,
-        var lastExecutionTime: Instant?,
+        val lastExecutionTime: Instant?,  // 改为不可变的 val
         val scheduleId: String
     )
     
@@ -175,7 +176,8 @@ class TemporalEventSchedulerImpl(
             if (isRunning) return
             
             isRunning = true
-            schedulerJob = CoroutineScope(Dispatchers.Default).launch {
+            schedulerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+            schedulerJob = schedulerScope!!.launch {
                 schedulerLoop()
             }
         }
@@ -186,11 +188,17 @@ class TemporalEventSchedulerImpl(
             if (!isRunning) return
             
             isRunning = false
+            
+            // 先取消作用域和任务
+            schedulerScope?.cancel()
             schedulerJob?.cancel()
             schedulerJob?.join()
             
             deferredEvents.clear()
             periodicEvents.clear()
+            
+            schedulerScope = null
+            schedulerJob = null
         }
     }
     
@@ -198,7 +206,7 @@ class TemporalEventSchedulerImpl(
      * 调度器主循环
      */
     private suspend fun schedulerLoop() {
-        val scope = CoroutineScope(coroutineContext)
+        val scope = schedulerScope ?: return
         while (scope.isActive && isRunning) {
             try {
                 val now = Instant.now()
@@ -256,33 +264,51 @@ class TemporalEventSchedulerImpl(
                 eventBus.publish(periodic.event)
                 
                 mutex.withLock {
-                    val updated = periodic.copy(lastExecutionTime = now)
-                    periodicEvents[periodic.scheduleId] = updated
+                    // 更新周期事件，记录执行时间（创建新实例）
+                    val updatedEvent = if (periodic.event is PeriodicEvent) {
+                        // 对于 PeriodicEvent，使用 recordExecution 创建新实例
+                        periodic.event.recordExecution(now)
+                    } else {
+                        // 对于其他事件类型，保持原样
+                        periodic.event
+                    }
+                    
+                    // 检查是否应该结束（在锁内检查，确保原子性）
+                    val shouldEnd = periodic.endTime != null && now.isAfter(periodic.endTime)
+                    
+                    if (shouldEnd) {
+                        periodicEvents.remove(periodic.scheduleId)
+                    } else {
+                        // 更新周期事件信息
+                        val updated = periodic.copy(
+                            event = updatedEvent,
+                            lastExecutionTime = now
+                        )
+                        periodicEvents[periodic.scheduleId] = updated
+                    }
                     executedPeriodicCount++
                 }
-                
-                // 检查是否应该结束
-                if (periodic.endTime != null && now.isAfter(periodic.endTime)) {
-                    mutex.withLock {
-                        periodicEvents.remove(periodic.scheduleId)
-                    }
-                }
             } catch (e: Exception) {
-                // 发布失败，继续
+                // 发布失败，继续处理下一个事件
+                // 注意：这里不会更新 lastExecutionTime，下次仍然会尝试执行
             }
         }
     }
     
-    override fun getStatistics(): SchedulerStatistics = runBlocking {
-        mutex.withLock {
-            SchedulerStatistics(
-                totalDeferredEvents = deferredEvents.size,
-                totalPeriodicEvents = periodicEvents.size,
-                activeDeferredEvents = deferredEvents.size,
-                activePeriodicEvents = periodicEvents.size,
-                executedDeferredEvents = executedDeferredCount,
-                executedPeriodicEvents = executedPeriodicCount
-            )
+    override fun getStatistics(): SchedulerStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking {
+            mutex.withLock {
+                SchedulerStatistics(
+                    totalDeferredEvents = deferredEvents.size,
+                    totalPeriodicEvents = periodicEvents.size,
+                    activeDeferredEvents = deferredEvents.size,
+                    activePeriodicEvents = periodicEvents.size,
+                    executedDeferredEvents = executedDeferredCount,
+                    executedPeriodicEvents = executedPeriodicCount
+                )
+            }
         }
     }
 }

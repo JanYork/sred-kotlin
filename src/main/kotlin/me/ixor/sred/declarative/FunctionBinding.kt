@@ -32,23 +32,7 @@ class FunctionBindingDSL {
 
 /**
  * 函数绑定扩展
+ * 
+ * 注意：业务相关的扩展函数应在业务层定义，不应在框架层
+ * 框架只提供通用的 bind 和 bindFunction 方法
  */
-fun FunctionBindingDSL.userValidation(stateId: String, function: suspend (StateContext) -> StateResult) {
-    bindFunction(stateId, function)
-}
-
-fun FunctionBindingDSL.userStorage(stateId: String, function: suspend (StateContext) -> StateResult) {
-    bindFunction(stateId, function)
-}
-
-fun FunctionBindingDSL.emailNotification(stateId: String, function: suspend (StateContext) -> StateResult) {
-    bindFunction(stateId, function)
-}
-
-fun FunctionBindingDSL.paymentProcessing(stateId: String, function: suspend (StateContext) -> StateResult) {
-    bindFunction(stateId, function)
-}
-
-fun FunctionBindingDSL.shippingPreparation(stateId: String, function: suspend (StateContext) -> StateResult) {
-    bindFunction(stateId, function)
-}

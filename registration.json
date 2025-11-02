@@ -1,0 +1,115 @@
+{
+  "name": "用户注册流程",
+  "description": "用户注册并激活账户的状态流程",
+  "version": "1.0.0",
+  "config": {
+    "pauseable": true,
+    "defaultTimeout": null,
+    "autoResume": false
+  },
+  "states": [
+    {
+      "id": "registration_initiated",
+      "name": "注册已发起",
+      "type": "INITIAL",
+      "isInitial": true
+    },
+    {
+      "id": "validating",
+      "name": "验证用户信息",
+      "type": "NORMAL"
+    },
+    {
+      "id": "sending_email",
+      "name": "发送验证邮件",
+      "type": "NORMAL"
+    },
+    {
+      "id": "waiting_verification",
+      "name": "等待验证",
+      "type": "NORMAL",
+      "pauseable": true,
+      "timeout": -1,
+      "pauseOnEnter": true
+    },
+    {
+      "id": "verifying_code",
+      "name": "验证验证码",
+      "type": "NORMAL"
+    },
+    {
+      "id": "activating",
+      "name": "激活账户",
+      "type": "NORMAL"
+    },
+    {
+      "id": "registration_success",
+      "name": "注册成功",
+      "type": "FINAL",
+      "isFinal": true
+    },
+    {
+      "id": "registration_failed",
+      "name": "注册失败",
+      "type": "ERROR",
+      "isError": true
+    }
+  ],
+  "transitions": [
+    {
+      "from": "registration_initiated",
+      "to": "validating",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "validating",
+      "to": "sending_email",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "validating",
+      "to": "registration_failed",
+      "condition": "Failure",
+      "priority": 0
+    },
+    {
+      "from": "sending_email",
+      "to": "waiting_verification",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "waiting_verification",
+      "to": "verifying_code",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "verifying_code",
+      "to": "activating",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "verifying_code",
+      "to": "registration_failed",
+      "condition": "Failure",
+      "priority": 0
+    },
+    {
+      "from": "activating",
+      "to": "registration_success",
+      "condition": "Success",
+      "priority": 1
+    },
+    {
+      "from": "activating",
+      "to": "registration_failed",
+      "condition": "Failure",
+      "priority": 0
+    }
+  ]
+}
+

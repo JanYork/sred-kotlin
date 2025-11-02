@@ -330,7 +330,11 @@ class EnhancedStateManager(
         }
     }
     
-    override fun getStatistics(): StateManagerStatistics = runBlocking { statistics.getStatistics() }
+    override fun getStatistics(): StateManagerStatistics {
+        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
+        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
+        return runBlocking { statistics.getStatistics() }
+    }
     
     /**
      * 获取当前轨迹
