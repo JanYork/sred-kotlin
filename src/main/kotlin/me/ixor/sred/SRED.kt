@@ -143,14 +143,13 @@ class EngineBuilder {
             null
         }
         
-        // 5. 构建编排器（如果不需要编排器，可以设置为 null）
+        // 5. 构建编排器
         val orchestrator = if (orchestratorBuilder != null) {
             orchestratorBuilder!!
                 .apply { if (persistenceAdapter != null) withExtendedStatePersistence(persistenceAdapter) }
                 .build()
         } else {
-            // 创建简单的编排器用于演示
-            // 实际使用中，用户可以通过 orchestrator {} DSL 自定义
+            // 创建默认的智能编排器
             StateOrchestratorBuilder.create()
                 .apply { if (persistenceAdapter != null) withExtendedStatePersistence(persistenceAdapter) }
                 .build()

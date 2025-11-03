@@ -3,6 +3,8 @@ package me.ixor.sred.orchestrator
 import me.ixor.sred.core.*
 import me.ixor.sred.event.*
 import me.ixor.sred.state.*
+import me.ixor.sred.reasoning.*
+import me.ixor.sred.policy.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -117,18 +119,34 @@ data class OrchestratorStatistics(
 )
 
 /**
- * 状态调度器实现
+ * 状态编排器实现 - 整合动态推理、自治状态和策略引擎
+ * 
+ * 符合论文要求：
+ * - "执行路径在运行时动态生成，而非编译时确定"
+ * - "系统应自行知道何时、为何、如何行动"
+ * - "系统策略可在运行时实时变更"
+ * 
+ * 此编排器整合了：
+ * 1. 动态状态推理引擎（StateInferenceEngine）
+ * 2. 上下文推理引擎（ContextReasoningEngine）
+ * 3. 策略引擎（PolicyEngine）
+ * 4. 自治状态支持（AutonomousState）
  */
 class StateOrchestratorImpl(
     override val stateManager: StateManager,
     override val eventBus: EventBus,
-    override val transitionRegistry: TransitionRegistry
+    override val transitionRegistry: TransitionRegistry,
+    private val stateInferenceEngine: StateInferenceEngine,
+    private val contextReasoningEngine: ContextReasoningEngine,
+    private val policyEngine: PolicyEngine? = null,
+    private val enableAutonomousRotation: Boolean = true
 ) : StateOrchestrator {
     
     private val mutex = Mutex()
     private val statistics = OrchestratorStatisticsImpl()
     private var isRunning = false
     private var eventListener: EventListener? = null
+    private var autonomousRotationJob: Job? = null
     
     override suspend fun start() {
         mutex.withLock {
@@ -148,6 +166,11 @@ class StateOrchestratorImpl(
                 filter = null
             )
             
+            // 如果启用自治轮转，启动后台任务
+            if (enableAutonomousRotation) {
+                startAutonomousRotationMonitoring()
+            }
+            
             isRunning = true
         }
     }
@@ -155,6 +178,10 @@ class StateOrchestratorImpl(
     override suspend fun stop() {
         mutex.withLock {
             if (!isRunning) return
+            
+            // 停止自治轮转监控
+            autonomousRotationJob?.cancel()
+            autonomousRotationJob = null
             
             // 停止事件总线
             eventBus.stop()
@@ -187,37 +214,39 @@ class StateOrchestratorImpl(
                 )
             }
             
-            // 查找可能的转移
-            val possibleTransitions = transitionRegistry.findTransitions(
+            // ========== 使用动态推理引擎 ==========
+            // 1. 获取预定义转移
+            val predefinedTransitions = transitionRegistry.findTransitions(
                 currentState.id,
                 event.type
             )
             
-            if (possibleTransitions.isEmpty()) {
-                return OrchestrationResult(
-                    success = false,
-                    error = IllegalStateException("No transitions found for state ${currentState.id} and event ${event.type}")
-                )
-            }
-            
-            // 选择最佳转移（按优先级排序）
-            val bestTransition = possibleTransitions
-                .filter { it.canTransition(currentState, event, currentContext) }
-                .maxByOrNull { it.priority }
-            
-            if (bestTransition == null) {
-                return OrchestrationResult(
-                    success = false,
-                    error = IllegalStateException("No valid transitions found")
-                )
-            }
-            
-            // 执行状态转移
-            val transitionResult = bestTransition.executeTransition(
-                currentState,
-                event,
-                currentContext
+            // 2. 使用推理引擎动态推理最优转移
+            val optimalTransition = stateInferenceEngine.selectOptimalTransition(
+                currentState = currentState,
+                event = event,
+                context = currentContext,
+                predefinedTransitions = predefinedTransitions
             )
+            
+            if (optimalTransition == null) {
+                return OrchestrationResult(
+                    success = false,
+                    error = IllegalStateException(
+                        "No valid transitions found for state ${currentState.id} and event ${event.type}"
+                    )
+                )
+            }
+            
+            // 3. 执行推理出的最优转移
+            val transitionResult = mutex.withLock {
+                executeInferredTransition(
+                    currentState = currentState,
+                    optimalTransition = optimalTransition,
+                    event = event,
+                    context = currentContext
+                )
+            }
             
             if (transitionResult.success && transitionResult.nextStateId != null) {
                 // 执行状态转移
@@ -261,6 +290,139 @@ class StateOrchestratorImpl(
         }
     }
     
+    /**
+     * 执行推理出的转移
+     */
+    private suspend fun executeInferredTransition(
+        currentState: State,
+        optimalTransition: OptimalTransition,
+        event: Event,
+        context: StateContext
+    ): StateTransitionResult {
+        val inferred = optimalTransition.inferredTransition
+        
+        // 如果是自治状态提议，使用提议的上下文更新
+        val updatedContext = if (inferred.autonomousProposal != null) {
+            val proposal = inferred.autonomousProposal!!
+            
+            // 执行转移前检查
+            if (!proposal.preTransitionCheck(context)) {
+                return StateTransitionResult(
+                    success = false,
+                    updatedContext = context,
+                    error = IllegalStateException("Pre-transition check failed")
+                )
+            }
+            
+            // 更新上下文
+            val ctxAfterUpdate = proposal.contextUpdate(context)
+            
+            // 执行转移后动作
+            proposal.postTransitionAction(ctxAfterUpdate)
+        } else {
+            // 普通转移，更新上下文
+            context.copy(
+                currentStateId = inferred.targetStateId,
+                localState = context.localState + inferred.requiredContext
+            ).addEvent(event)
+        }
+        
+        return StateTransitionResult(
+            success = true,
+            nextStateId = inferred.targetStateId,
+            updatedContext = updatedContext,
+            sideEffects = emptyList()
+        )
+    }
+    
+    /**
+     * 启动自治轮转监控
+     * 
+     * 定期检查自治状态是否需要主动轮转
+     */
+    private fun startAutonomousRotationMonitoring() {
+        autonomousRotationJob = CoroutineScope(Dispatchers.Default).launch {
+            while (isActive && isRunning) {
+                try {
+                    checkAutonomousRotation()
+                    delay(1000) // 每秒检查一次
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // 记录错误但继续运行
+                }
+            }
+        }
+    }
+    
+    /**
+     * 检查自治状态是否需要轮转
+     */
+    private suspend fun checkAutonomousRotation() {
+        val currentState = stateManager.getCurrentState() as? AutonomousState ?: return
+        val currentContext = stateManager.currentContext ?: return
+        
+        // 检查是否应该主动轮转
+        if (!currentState.shouldAutoRotate(currentContext)) {
+            return
+        }
+        
+        // 获取自治状态的转移提议
+        val proposal = currentState.proposeTransition(currentContext)
+        if (proposal != null) {
+            // 执行自治状态提议的转移
+            executeAutonomousTransition(proposal, currentContext)
+        }
+    }
+    
+    /**
+     * 执行自治状态提议的转移
+     */
+    private suspend fun executeAutonomousTransition(
+        proposal: StateTransitionProposal,
+        context: StateContext
+    ) {
+        try {
+            // 执行转移前检查
+            if (!proposal.preTransitionCheck(context)) {
+                return
+            }
+            
+            // 更新上下文
+            val updatedContext = proposal.contextUpdate(context)
+            
+            // 执行状态转移
+            val result = stateManager.transitionTo(
+                proposal.targetStateId,
+                proposal.triggerEvent ?: createAutoTransitionEvent(proposal),
+                updatedContext
+            )
+            
+            if (result.success) {
+                // 执行转移后动作
+                proposal.postTransitionAction(result.updatedContext)
+            }
+        } catch (e: Exception) {
+            // 记录错误
+        }
+    }
+    
+    /**
+     * 创建自动转移事件
+     */
+    private fun createAutoTransitionEvent(proposal: StateTransitionProposal): Event {
+        return EventFactory.builder()
+            .type("system", "autonomous_transition")
+            .name("自治状态转移")
+            .description("由状态${proposal.fromStateId}主动提议转移到${proposal.targetStateId}")
+            .source("autonomous-state")
+            .payload(mapOf(
+                "proposalId" to proposal.proposalId,
+                "reason" to proposal.reason.name
+            ))
+            .build()
+    }
+    
     override suspend fun registerTransition(transition: StateTransition) {
         transitionRegistry.registerTransition(transition)
     }
@@ -270,10 +432,23 @@ class StateOrchestratorImpl(
     }
     
     override fun getStatistics(): OrchestratorStatistics {
-        // 注意：使用 runBlocking 是因为接口是同步的，但内部统计使用 Mutex（需要 suspend）
-        // 这可能会阻塞调用线程，但通常统计方法调用频率较低，可以接受
         return runBlocking { statistics.getStatistics() }
     }
+    
+    /**
+     * 获取推理引擎
+     */
+    fun getInferenceEngine(): StateInferenceEngine = stateInferenceEngine
+    
+    /**
+     * 获取上下文推理引擎
+     */
+    fun getContextReasoningEngine(): ContextReasoningEngine = contextReasoningEngine
+    
+    /**
+     * 获取策略引擎
+     */
+    fun getPolicyEngine(): PolicyEngine? = policyEngine
     
     private fun createEventListener(): EventListener {
         return object : EventListener {
@@ -284,7 +459,7 @@ class StateOrchestratorImpl(
             }
             
             override suspend fun onError(event: Event, error: Throwable) {
-                // Log error
+                statistics.recordFailure()
             }
         }
     }
@@ -381,12 +556,39 @@ internal class OrchestratorStatisticsImpl {
 }
 
 /**
- * 状态调度器工厂
+ * 状态编排器工厂
  */
 object StateOrchestratorFactory {
-    fun create(
+    suspend fun create(
         stateManager: StateManager,
         eventBus: EventBus,
-        transitionRegistry: TransitionRegistry = TransitionRegistryImpl()
-    ): StateOrchestrator = StateOrchestratorImpl(stateManager, eventBus, transitionRegistry)
+        transitionRegistry: TransitionRegistry = TransitionRegistryImpl(),
+        contextReasoningEngine: ContextReasoningEngine? = null,
+        policyEngine: PolicyEngine? = null,
+        enableAutonomousRotation: Boolean = true,
+        inferenceConfig: InferenceConfig = InferenceConfig(),
+        reasoningConfig: ReasoningConfig = ReasoningConfig()
+    ): StateOrchestrator {
+        val stateRegistry = stateManager.stateRegistry
+        
+        val contextEngine = contextReasoningEngine 
+            ?: ContextReasoningEngineFactory.create(stateRegistry, reasoningConfig)
+        
+        val inferenceEngine = StateInferenceEngineFactory.create(
+            stateRegistry = stateRegistry,
+            contextReasoningEngine = contextEngine,
+            policyEngine = policyEngine,
+            config = inferenceConfig
+        )
+        
+        return StateOrchestratorImpl(
+            stateManager = stateManager,
+            eventBus = eventBus,
+            transitionRegistry = transitionRegistry,
+            stateInferenceEngine = inferenceEngine,
+            contextReasoningEngine = contextEngine,
+            policyEngine = policyEngine,
+            enableAutonomousRotation = enableAutonomousRotation
+        )
+    }
 }

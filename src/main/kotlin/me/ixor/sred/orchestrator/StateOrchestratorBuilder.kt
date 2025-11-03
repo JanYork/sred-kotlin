@@ -3,75 +3,31 @@ package me.ixor.sred.orchestrator
 import me.ixor.sred.core.*
 import me.ixor.sred.event.*
 import me.ixor.sred.state.*
-import me.ixor.sred.persistence.PersistenceAdapterFactory
+import me.ixor.sred.reasoning.*
+import me.ixor.sred.policy.*
 import me.ixor.sred.persistence.ExtendedStatePersistence
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import java.io.File
+import kotlinx.coroutines.*
+import kotlinx.coroutines.runBlocking
 
 /**
- * StateOrchestrator构建器 - 支持链式配置
- * 
- * 使用构建器模式简化StateOrchestrator的创建和配置
+ * 状态编排器构建器 - 构建整合动态推理、自治状态和策略引擎的智能编排器
  */
 class StateOrchestratorBuilder {
-    private var stateRegistry: StateRegistry? = null
-    private var statePersistence: StatePersistence? = null
-    private var extendedStatePersistence: ExtendedStatePersistence? = null
-    private var stateLock: StateLock? = null
-    private var traceCollector: TraceCollector? = null
+    private var stateManager: StateManager? = null
     private var eventBus: EventBus? = null
-    private var transitionRegistry: TransitionRegistry? = null
-    private var temporalEventScheduler: TemporalEventScheduler? = null
-    private var enableTemporalEvents: Boolean = true
-    private var maxConcurrentTransactions: Int = 10
-    private var persistenceDbPath: String = "sred_state.db"
+    private var transitionRegistry: TransitionRegistry = TransitionRegistryImpl()
+    private var contextReasoningEngine: ContextReasoningEngine? = null
+    private var policyEngine: PolicyEngine? = null
+    private var enableAutonomousRotation: Boolean = true
+    private var inferenceConfig: InferenceConfig = InferenceConfig()
+    private var reasoningConfig: ReasoningConfig = ReasoningConfig()
+    private var persistence: ExtendedStatePersistence? = null
     
     /**
-     * 设置状态注册表
+     * 设置状态管理器
      */
-    fun withStateRegistry(registry: StateRegistry) = apply {
-        this.stateRegistry = registry
-    }
-    
-    /**
-     * 设置状态持久化
-     */
-    fun withStatePersistence(persistence: StatePersistence) = apply {
-        this.statePersistence = persistence
-        if (persistence is ExtendedStatePersistence) {
-            this.extendedStatePersistence = persistence
-        }
-    }
-    
-    /**
-     * 设置扩展的状态持久化（支持历史记录功能）
-     */
-    fun withExtendedStatePersistence(persistence: ExtendedStatePersistence) = apply {
-        this.extendedStatePersistence = persistence
-        this.statePersistence = persistence
-    }
-    
-    /**
-     * 使用SQLite持久化
-     */
-    fun withSqlitePersistence(dbPath: String = "sred_state.db") = apply {
-        this.persistenceDbPath = dbPath
-        // 适配器将在 build() 方法中初始化
-    }
-    
-    /**
-     * 设置状态锁
-     */
-    fun withStateLock(lock: StateLock) = apply {
-        this.stateLock = lock
-    }
-    
-    /**
-     * 设置轨迹收集器
-     */
-    fun withTraceCollector(collector: TraceCollector) = apply {
-        this.traceCollector = collector
+    fun withStateManager(manager: StateManager) = apply {
+        this.stateManager = manager
     }
     
     /**
@@ -89,85 +45,90 @@ class StateOrchestratorBuilder {
     }
     
     /**
-     * 设置时间事件调度器
+     * 设置上下文推理引擎
      */
-    fun withTemporalEventScheduler(scheduler: TemporalEventScheduler) = apply {
-        this.temporalEventScheduler = scheduler
+    fun withContextReasoningEngine(engine: ContextReasoningEngine) = apply {
+        this.contextReasoningEngine = engine
     }
     
     /**
-     * 启用/禁用时间事件
+     * 设置策略引擎
      */
-    fun enableTemporalEvents(enable: Boolean) = apply {
-        this.enableTemporalEvents = enable
+    fun withPolicyEngine(engine: PolicyEngine) = apply {
+        this.policyEngine = engine
     }
     
     /**
-     * 设置最大并发事务数
+     * 启用/禁用自治轮转
      */
-    fun withMaxConcurrentTransactions(max: Int) = apply {
-        this.maxConcurrentTransactions = max
+    fun enableAutonomousRotation(enabled: Boolean) = apply {
+        this.enableAutonomousRotation = enabled
     }
     
     /**
-     * 构建StateOrchestrator
+     * 设置推理配置
+     */
+    fun withInferenceConfig(config: InferenceConfig) = apply {
+        this.inferenceConfig = config
+    }
+    
+    /**
+     * 设置推理配置
+     */
+    fun withReasoningConfig(config: ReasoningConfig) = apply {
+        this.reasoningConfig = config
+    }
+    
+    /**
+     * 设置持久化适配器（用于EnhancedStateManager）
+     */
+    fun withExtendedStatePersistence(persistence: ExtendedStatePersistence) = apply {
+        this.persistence = persistence
+    }
+    
+    /**
+     * 构建编排器
      */
     suspend fun build(): StateOrchestrator {
-        // 创建默认组件（如果未提供）
-        val registry = stateRegistry ?: StateRegistryFactory.create()
-        val lock = stateLock ?: StateLockFactory.create()
-        val collector = traceCollector ?: TraceCollectorFactory.create()
+        // 如果没有提供 StateManager，创建一个默认的
+        val persistenceValue = this.persistence
+        val manager = stateManager ?: runBlocking {
+            val registry = StateRegistryFactory.create()
+            val statePersistence = if (persistenceValue != null) {
+                persistenceValue as me.ixor.sred.state.StatePersistence
+            } else {
+                InMemoryStatePersistence()
+            }
+            StateManagerFactory.create(registry, statePersistence).also {
+                it.initialize()
+            }
+        }
+        
+        // 如果没有提供 EventBus，创建一个默认的
         val bus = eventBus ?: EventBusFactory.create()
-        val transRegistry = transitionRegistry ?: TransitionRegistryImpl()
         
-        // 创建扩展的持久化适配器（EnhancedStateManager需要）
-        val extendedPersistence = extendedStatePersistence ?: run {
-            val adapter = PersistenceAdapterFactory.createSqliteAdapter(persistenceDbPath)
-            adapter.initialize()
-            adapter
-        }
-        
-        val stateManager = EnhancedStateManager(
-            stateRegistry = registry,
-            persistence = extendedPersistence,
-            stateLock = lock,
-            traceCollector = collector
-        )
-        
-        // 创建时间事件调度器（如果需要）
-        val scheduler = if (enableTemporalEvents && temporalEventScheduler == null) {
-            TemporalEventSchedulerFactory.create(bus)
-        } else {
-            temporalEventScheduler
-        }
-        
-        // 创建并初始化StateManager
-        stateManager.initialize()
-        
-        // 返回EnhancedStateOrchestrator
-        return EnhancedStateOrchestrator(
-            stateManager = stateManager,
+        return StateOrchestratorFactory.create(
+            stateManager = manager,
             eventBus = bus,
-            transitionRegistry = transRegistry,
-            temporalEventScheduler = scheduler,
-            maxConcurrentTransactions = maxConcurrentTransactions
+            transitionRegistry = transitionRegistry,
+            contextReasoningEngine = contextReasoningEngine,
+            policyEngine = policyEngine,
+            enableAutonomousRotation = enableAutonomousRotation,
+            inferenceConfig = inferenceConfig,
+            reasoningConfig = reasoningConfig
         )
     }
     
     /**
-     * 创建默认配置的构建器
+     * 构建并启动编排器
      */
+    suspend fun buildAndStart(): StateOrchestrator {
+        val orchestrator = build()
+        orchestrator.start()
+        return orchestrator
+    }
+    
     companion object {
         fun create(): StateOrchestratorBuilder = StateOrchestratorBuilder()
     }
 }
-
-/**
- * 扩展函数：快速创建Orchestrator
- */
-suspend fun StateOrchestratorBuilder.buildAndStart(): StateOrchestrator {
-    val orchestrator = build()
-    orchestrator.start()
-    return orchestrator
-}
-

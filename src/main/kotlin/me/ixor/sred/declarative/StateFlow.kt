@@ -2,12 +2,7 @@ package me.ixor.sred.declarative
 
 import me.ixor.sred.core.*
 import me.ixor.sred.declarative.annotations.AnnotationProcessor
-import me.ixor.sred.declarative.BranchingSupport.ExecutionMode
-import me.ixor.sred.declarative.BranchingSupport.BranchConfiguration
-import me.ixor.sred.declarative.BranchingSupport.ParallelConfiguration
-import me.ixor.sred.declarative.BranchingSupport.ParallelBranch
-import me.ixor.sred.declarative.BranchingSupport.ParallelWaitStrategy
-import me.ixor.sred.declarative.BranchingSupport.ParallelErrorStrategy
+import me.ixor.sred.declarative.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Deferred
 import java.util.concurrent.ConcurrentHashMap

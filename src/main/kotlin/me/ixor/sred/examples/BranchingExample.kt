@@ -2,15 +2,6 @@ package me.ixor.sred.examples
 
 import me.ixor.sred.core.*
 import me.ixor.sred.declarative.*
-import me.ixor.sred.declarative.BranchingSupport.ExecutionMode
-import me.ixor.sred.declarative.BranchingSupport.BranchConfiguration
-import me.ixor.sred.declarative.BranchingSupport.ParallelConfiguration
-import me.ixor.sred.declarative.BranchingSupport.ParallelBranch
-import me.ixor.sred.declarative.BranchingSupport.ParallelWaitStrategy
-import me.ixor.sred.declarative.BranchingSupport.ParallelErrorStrategy
-import me.ixor.sred.declarative.BranchingSupport.ContextConditionEvaluatorBuilder
-import me.ixor.sred.declarative.BranchingSupport.ComparisonOperator
-import me.ixor.sred.declarative.BranchingSupport.LogicalOperator
 import kotlinx.coroutines.runBlocking
 
 /**

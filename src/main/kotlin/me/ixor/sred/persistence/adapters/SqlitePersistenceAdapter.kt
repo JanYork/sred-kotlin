@@ -8,6 +8,7 @@ import me.ixor.sred.persistence.TransactionManager
 import me.ixor.sred.persistence.SqliteTransactionManager
 import me.ixor.sred.persistence.TransactionId
 import me.ixor.sred.persistence.TransactionContextKey
+import me.ixor.sred.persistence.*
 import me.ixor.sred.state.StateHistoryEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -155,10 +156,27 @@ class SqlitePersistenceAdapter(
                 )
             """.trimIndent())
             
+            // 快照表
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS state_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    context_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    description TEXT,
+                    local_state TEXT,
+                    global_state TEXT,
+                    metadata TEXT,
+                    snapshot_metadata TEXT,
+                    FOREIGN KEY (context_id) REFERENCES state_contexts(id)
+                )
+            """.trimIndent())
+            
             // 创建索引
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_context_updated ON state_contexts(last_updated_at)")
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_event_context ON event_history(context_id)")
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_history_context ON state_history(context_id)")
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_context ON state_snapshots(context_id)")
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_snapshot_timestamp ON state_snapshots(timestamp)")
         }
     }
     
@@ -485,6 +503,380 @@ class SqlitePersistenceAdapter(
         if (closed || connection == null) {
             throw PersistenceException("Persistence adapter is closed or not initialized")
         }
+    }
+    
+    // ========== 快照功能实现 ==========
+    
+    override suspend fun createSnapshot(
+        contextId: ContextId,
+        snapshotId: String?,
+        description: String?,
+        transactionId: TransactionId?
+    ): String = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        // 加载当前上下文
+        val context = loadContext(contextId, transactionId)
+            ?: throw PersistenceException("Context not found: $contextId")
+        
+        val actualSnapshotId = snapshotId ?: "${contextId}_snapshot_${System.currentTimeMillis()}"
+        val now = Instant.now()
+        
+        conn.prepareStatement("""
+            INSERT INTO state_snapshots 
+            (snapshot_id, context_id, timestamp, description, local_state, global_state, metadata, snapshot_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, actualSnapshotId)
+            stmt.setString(2, contextId)
+            stmt.setString(3, now.toString())
+            stmt.setString(4, description)
+            stmt.setString(5, serialize(context.localState))
+            stmt.setString(6, serialize(context.globalState))
+            stmt.setString(7, serialize(context.metadata))
+            stmt.setString(8, serialize(emptyMap<String, Any>()))
+            stmt.executeUpdate()
+        }
+        
+        actualSnapshotId
+    }
+    
+    override suspend fun listSnapshots(
+        contextId: ContextId,
+        transactionId: TransactionId?
+    ): List<StateSnapshot> = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        conn.prepareStatement("""
+            SELECT snapshot_id, context_id, timestamp, description, 
+                   local_state, global_state, metadata, snapshot_metadata
+            FROM state_snapshots
+            WHERE context_id = ?
+            ORDER BY timestamp DESC
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, contextId)
+            stmt.executeQuery().use { rs ->
+                val snapshots = mutableListOf<StateSnapshot>()
+                while (rs.next()) {
+                    val snapshotContext = buildStateContext(
+                        id = contextId,
+                        currentStateId = "",  // 从上下文元数据中获取
+                        createdAt = Instant.parse(rs.getString("timestamp")),
+                        lastUpdatedAt = Instant.parse(rs.getString("timestamp")),
+                        localStateJson = rs.getString("local_state"),
+                        globalStateJson = rs.getString("global_state"),
+                        metadataJson = rs.getString("metadata"),
+                        contextId = contextId
+                    )
+                    
+                    snapshots.add(
+                        StateSnapshot(
+                            snapshotId = rs.getString("snapshot_id"),
+                            contextId = contextId,
+                            timestamp = Instant.parse(rs.getString("timestamp")),
+                            description = rs.getString("description"),
+                            context = snapshotContext,
+                            metadata = deserialize<Map<String, Any>>(rs.getString("snapshot_metadata") ?: "{}")
+                        )
+                    )
+                }
+                snapshots
+            }
+        }
+    }
+    
+    override suspend fun loadSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId?
+    ): StateContext? = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        conn.prepareStatement("""
+            SELECT local_state, global_state, metadata
+            FROM state_snapshots
+            WHERE snapshot_id = ? AND context_id = ?
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, snapshotId)
+            stmt.setString(2, contextId)
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    buildStateContext(
+                        id = contextId,
+                        currentStateId = "",  // 从元数据中获取
+                        createdAt = Instant.now(),
+                        lastUpdatedAt = Instant.now(),
+                        localStateJson = rs.getString("local_state"),
+                        globalStateJson = rs.getString("global_state"),
+                        metadataJson = rs.getString("metadata"),
+                        contextId = contextId
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+    }
+    
+    override suspend fun loadSnapshotByTime(
+        contextId: ContextId,
+        timestamp: Instant,
+        transactionId: TransactionId?
+    ): StateSnapshot? = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        // 查找最接近指定时间点的快照
+        conn.prepareStatement("""
+            SELECT snapshot_id, context_id, timestamp, description,
+                   local_state, global_state, metadata, snapshot_metadata
+            FROM state_snapshots
+            WHERE context_id = ? AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, contextId)
+            stmt.setString(2, timestamp.toString())
+            stmt.executeQuery().use { rs ->
+                if (rs.next()) {
+                    val snapshotContext = buildStateContext(
+                        id = contextId,
+                        currentStateId = "",
+                        createdAt = Instant.parse(rs.getString("timestamp")),
+                        lastUpdatedAt = Instant.parse(rs.getString("timestamp")),
+                        localStateJson = rs.getString("local_state"),
+                        globalStateJson = rs.getString("global_state"),
+                        metadataJson = rs.getString("metadata"),
+                        contextId = contextId
+                    )
+                    
+                    StateSnapshot(
+                        snapshotId = rs.getString("snapshot_id"),
+                        contextId = contextId,
+                        timestamp = Instant.parse(rs.getString("timestamp")),
+                        description = rs.getString("description"),
+                        context = snapshotContext,
+                        metadata = deserialize<Map<String, Any>>(rs.getString("snapshot_metadata") ?: "{}")
+                    )
+                } else {
+                    null
+                }
+            }
+        }
+    }
+    
+    override suspend fun rollbackToSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId?
+    ): Boolean = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        val snapshot = loadSnapshot(contextId, snapshotId, transactionId)
+            ?: return@withContext false
+        
+        // 保存当前状态为快照（用于恢复）
+        createSnapshot(contextId, null, "Pre-rollback snapshot", transactionId)
+        
+        // 恢复快照状态
+        saveContext(snapshot, transactionId)
+        
+        true
+    }
+    
+    override suspend fun deleteSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId?
+    ): Boolean = withContext(Dispatchers.IO) {
+        val conn = getConnection(transactionId)
+        
+        conn.prepareStatement("""
+            DELETE FROM state_snapshots
+            WHERE snapshot_id = ? AND context_id = ?
+        """.trimIndent()).use { stmt ->
+            stmt.setString(1, snapshotId)
+            stmt.setString(2, contextId)
+            stmt.executeUpdate() > 0
+        }
+    }
+    
+    override suspend fun validateContext(context: StateContext): ContextValidationResult {
+        val issues = mutableListOf<ContextValidationIssue>()
+        val warnings = mutableListOf<String>()
+        
+        // 验证必需字段
+        val contextId = context.id ?: ""
+        if (contextId.isEmpty()) {
+            issues.add(
+                ContextValidationIssue(
+                    type = ValidationIssueType.MISSING_REQUIRED_FIELD,
+                    severity = ValidationSeverity.CRITICAL,
+                    message = "Context ID is empty",
+                    field = "id",
+                    suggestedFix = "Ensure context has a valid ID"
+                )
+            )
+        }
+        
+        val currentStateId = context.currentStateId ?: ""
+        if (currentStateId.isEmpty()) {
+            issues.add(
+                ContextValidationIssue(
+                    type = ValidationIssueType.MISSING_REQUIRED_FIELD,
+                    severity = ValidationSeverity.ERROR,
+                    message = "Current state ID is empty",
+                    field = "currentStateId",
+                    suggestedFix = "Set a valid state ID"
+                )
+            )
+        }
+        
+        // 验证状态ID格式（简单检查）
+        if (currentStateId.isNotEmpty() && !currentStateId.matches(Regex("^[a-zA-Z0-9_]+$"))) {
+            issues.add(
+                ContextValidationIssue(
+                    type = ValidationIssueType.INVALID_STATE_ID,
+                    severity = ValidationSeverity.ERROR,
+                    message = "Invalid state ID format: $currentStateId",
+                    field = "currentStateId",
+                    suggestedFix = "Use alphanumeric characters and underscores only"
+                )
+            )
+        }
+        
+        // 验证元数据一致性
+        context.metadata.forEach { (key, value) ->
+            if (key.startsWith("_") && value == null) {
+                warnings.add("Metadata key '$key' has null value")
+            }
+        }
+        
+        return ContextValidationResult(
+            isValid = issues.none { it.severity == ValidationSeverity.ERROR || it.severity == ValidationSeverity.CRITICAL },
+            issues = issues,
+            warnings = warnings
+        )
+    }
+    
+    override suspend fun repairContext(
+        contextId: ContextId,
+        issues: List<ContextValidationIssue>,
+        transactionId: TransactionId?
+    ): StateContext? = withContext(Dispatchers.IO) {
+        val context = loadContext(contextId, transactionId) ?: return@withContext null
+        
+        var repairedContext = context
+        
+        issues.forEach { issue ->
+            when (issue.type) {
+                ValidationIssueType.MISSING_REQUIRED_FIELD -> {
+                    when (issue.field) {
+                        "id" -> {
+                            // ID不能修复，跳过
+                        }
+                        "currentStateId" -> {
+                            // 设置默认状态ID
+                            repairedContext = repairedContext.copy(
+                                currentStateId = "unknown"
+                            )
+                        }
+                    }
+                }
+                ValidationIssueType.INVALID_STATE_ID -> {
+                    // 清理无效字符
+                    val currentStateId = repairedContext.currentStateId ?: ""
+                    val cleanedStateId = currentStateId.replace(Regex("[^a-zA-Z0-9_]"), "_")
+                    repairedContext = repairedContext.copy(
+                        currentStateId = cleanedStateId
+                    )
+                }
+                else -> {
+                    // 其他问题暂不自动修复
+                }
+            }
+        }
+        
+        // 保存修复后的上下文
+        saveContext(repairedContext, transactionId)
+        repairedContext
+    }
+    
+    override suspend fun exportContext(
+        contextId: ContextId,
+        transactionId: TransactionId?
+    ): ExportedContext = withContext(Dispatchers.IO) {
+        val context = loadContext(contextId, transactionId)
+            ?: throw PersistenceException("Context not found: $contextId")
+        
+        // 加载历史记录
+        val history = getStateHistory(contextId, transactionId)
+        
+        // 加载快照
+        val snapshots = listSnapshots(contextId, transactionId)
+        
+        ExportedContext(
+            contextId = contextId,
+            context = context,
+            history = history,
+            snapshots = snapshots,
+            metadata = mapOf<String, Any>(
+                "exportedAt" to Instant.now().toString(),
+                "sourceInstance" to (System.getProperty("user.name") ?: "unknown")
+            ),
+            exportedAt = Instant.now(),
+            sourceInstance = System.getProperty("user.name") ?: "unknown",
+            version = "1.0"
+        )
+    }
+    
+    override suspend fun importContext(
+        exportedContext: ExportedContext,
+        targetContextId: ContextId?,
+        transactionId: TransactionId?
+    ): ContextId = withContext(Dispatchers.IO) {
+        val finalContextId = targetContextId ?: exportedContext.contextId
+        
+        // 如果目标ID已存在，可以选择覆盖或创建新ID
+        val existingContext = loadContext(finalContextId, transactionId)
+        val actualContextId = if (existingContext != null) {
+            // 存在则覆盖，或可以抛出异常
+            finalContextId
+        } else {
+            finalContextId
+        }
+        
+        // 保存上下文
+        // 如果导出的 context.id 与目标 ID 不同，需要使用 StateContextBuilder 重新创建
+        val contextToImport = if (exportedContext.context.id == actualContextId) {
+            exportedContext.context
+        } else {
+            // 使用 StateContextBuilder 创建新的上下文，使用目标 ID
+            StateContextFactory.builder()
+                .id(actualContextId)
+                .currentStateId(exportedContext.context.currentStateId)
+                .createdAt(exportedContext.context.createdAt)
+                .localState(exportedContext.context.localState)
+                .globalState(exportedContext.context.globalState)
+                .addEvents(exportedContext.context.recentEvents)
+                .metadata(exportedContext.context.metadata)
+                .build()
+        }
+        saveContext(contextToImport, transactionId)
+        
+        // 导入历史记录（可选，根据需求决定是否导入）
+        // 注意：历史记录的时间戳可能来自不同实例
+        
+        // 导入快照（可选）
+        exportedContext.snapshots.forEach { snapshot ->
+            createSnapshot(
+                contextId = actualContextId,
+                snapshotId = "${snapshot.snapshotId}_imported",
+                description = "Imported: ${snapshot.description}",
+                transactionId = transactionId
+            )
+        }
+        
+        actualContextId
     }
 }
 

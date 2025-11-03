@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import java.time.Instant
+import java.io.Serializable
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -235,6 +236,196 @@ interface ExtendedStatePersistence : StatePersistence {
      * @param transactionId 可选的事务ID，如果提供则在同一事务中执行
      */
     suspend fun findPausedInstances(transactionId: TransactionId? = null): List<ContextId>
+    
+    /**
+     * 创建状态快照
+     * @param contextId 上下文ID
+     * @param snapshotId 快照ID（可选，如果为null则自动生成）
+     * @param description 快照描述
+     * @param transactionId 可选的事务ID
+     * @return 快照ID
+     */
+    suspend fun createSnapshot(
+        contextId: ContextId,
+        snapshotId: String? = null,
+        description: String? = null,
+        transactionId: TransactionId? = null
+    ): String
+    
+    /**
+     * 列出所有快照
+     * @param contextId 上下文ID
+     * @param transactionId 可选的事务ID
+     * @return 快照列表
+     */
+    suspend fun listSnapshots(
+        contextId: ContextId,
+        transactionId: TransactionId? = null
+    ): List<StateSnapshot>
+    
+    /**
+     * 加载指定快照
+     * @param contextId 上下文ID
+     * @param snapshotId 快照ID
+     * @param transactionId 可选的事务ID
+     * @return 快照状态上下文，如果不存在则返回null
+     */
+    suspend fun loadSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId? = null
+    ): StateContext?
+    
+    /**
+     * 加载指定时间点的快照
+     * @param contextId 上下文ID
+     * @param timestamp 时间点
+     * @param transactionId 可选的事务ID
+     * @return 最接近该时间点的快照
+     */
+    suspend fun loadSnapshotByTime(
+        contextId: ContextId,
+        timestamp: Instant,
+        transactionId: TransactionId? = null
+    ): StateSnapshot?
+    
+    /**
+     * 回滚到指定快照
+     * @param contextId 上下文ID
+     * @param snapshotId 快照ID
+     * @param transactionId 可选的事务ID
+     * @return 是否成功
+     */
+    suspend fun rollbackToSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId? = null
+    ): Boolean
+    
+    /**
+     * 删除快照
+     * @param contextId 上下文ID
+     * @param snapshotId 快照ID
+     * @param transactionId 可选的事务ID
+     * @return 是否成功
+     */
+    suspend fun deleteSnapshot(
+        contextId: ContextId,
+        snapshotId: String,
+        transactionId: TransactionId? = null
+    ): Boolean
+    
+    /**
+     * 验证状态上下文一致性
+     * @param context 状态上下文
+     * @return 验证结果
+     */
+    suspend fun validateContext(context: StateContext): ContextValidationResult
+    
+    /**
+     * 修复状态上下文的不一致性
+     * @param contextId 上下文ID
+     * @param issues 需要修复的问题列表
+     * @param transactionId 可选的事务ID
+     * @return 修复后的上下文
+     */
+    suspend fun repairContext(
+        contextId: ContextId,
+        issues: List<ContextValidationIssue>,
+        transactionId: TransactionId? = null
+    ): StateContext?
+    
+    /**
+     * 导出状态上下文（用于跨实例迁移）
+     * @param contextId 上下文ID
+     * @param transactionId 可选的事务ID
+     * @return 导出的上下文数据
+     */
+    suspend fun exportContext(
+        contextId: ContextId,
+        transactionId: TransactionId? = null
+    ): ExportedContext
+    
+    /**
+     * 导入状态上下文（用于跨实例迁移）
+     * @param exportedContext 导出的上下文数据
+     * @param targetContextId 目标上下文ID（可选，如果为null则使用原ID）
+     * @param transactionId 可选的事务ID
+     * @return 导入后的上下文ID
+     */
+    suspend fun importContext(
+        exportedContext: ExportedContext,
+        targetContextId: ContextId? = null,
+        transactionId: TransactionId? = null
+    ): ContextId
+}
+
+/**
+ * 导出的上下文数据
+ */
+data class ExportedContext(
+    val contextId: ContextId,
+    val context: StateContext,
+    val history: List<StateHistoryEntry> = emptyList(),
+    val snapshots: List<StateSnapshot> = emptyList(),
+    val metadata: Map<String, Any> = emptyMap(),
+    val exportedAt: Instant = Instant.now(),
+    val sourceInstance: String? = null,
+    val version: String = "1.0"
+)
+
+/**
+ * 状态快照
+ */
+data class StateSnapshot(
+    val snapshotId: String,
+    val contextId: ContextId,
+    val timestamp: Instant,
+    val description: String? = null,
+    val context: StateContext,
+    val metadata: Map<String, Any> = emptyMap()
+)
+
+/**
+ * 上下文验证结果
+ */
+data class ContextValidationResult(
+    val isValid: Boolean,
+    val issues: List<ContextValidationIssue> = emptyList(),
+    val warnings: List<String> = emptyList()
+)
+
+/**
+ * 上下文验证问题
+ */
+data class ContextValidationIssue(
+    val type: ValidationIssueType,
+    val severity: ValidationSeverity,
+    val message: String,
+    val field: String? = null,
+    val suggestedFix: String? = null
+)
+
+/**
+ * 验证问题类型
+ */
+enum class ValidationIssueType {
+    MISSING_REQUIRED_FIELD,
+    INVALID_STATE_ID,
+    INVALID_EVENT_HISTORY,
+    INCONSISTENT_METADATA,
+    CORRUPTED_DATA,
+    MISSING_DEPENDENCY
+}
+
+/**
+ * 验证严重程度
+ */
+enum class ValidationSeverity {
+    INFO,
+    WARNING,
+    ERROR,
+    CRITICAL
 }
 
 /**
