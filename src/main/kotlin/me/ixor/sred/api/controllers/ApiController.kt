@@ -73,10 +73,12 @@ class ApiController(
         return runBlocking {
             try {
                 val response = registrationService.executeRegistration(request)
-                if (response.success) {
-                    ResponseEntity.ok(response)
-                } else {
-                    ResponseEntity.badRequest().body(response)
+                when {
+                    response.success -> ResponseEntity.ok(response)
+                    // 中间态：流程已创建但未完成（例如 waiting_verification / sending_email）
+                    response.instanceId != null -> ResponseEntity.status(HttpStatus.ACCEPTED).body(response)
+                    // 明确错误：没有实例或其他失败
+                    else -> ResponseEntity.badRequest().body(response)
                 }
             } catch (e: Exception) {
                 ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
@@ -121,11 +123,15 @@ class ApiController(
                     ?: throw IllegalArgumentException("verificationCode 参数缺失")
                 
                 val response = registrationService.submitVerificationCode(instanceId, verificationCode)
-                
-                if (response.success) {
-                    ResponseEntity.ok(response)
-                } else {
-                    ResponseEntity.badRequest().body(response)
+                when {
+                    // 终态成功
+                    response.success -> ResponseEntity.ok(response)
+                    // 中间态成功：已触发验证并继续处理，但尚未到 success 终态
+                    response.instanceId != null && (response.finalState?.let { state ->
+                        !state.contains("success") && !state.contains("failed")
+                    } == true) -> ResponseEntity.status(HttpStatus.ACCEPTED).body(response)
+                    // 明确失败
+                    else -> ResponseEntity.badRequest().body(response)
                 }
             } catch (e: Exception) {
                 ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)

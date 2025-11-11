@@ -62,6 +62,8 @@ class RegistrationService(
         val email = context.getLocalState<String>("email") ?: ""
         val inputCode = context.getLocalState<String>("inputCode") ?: ""
         val expectedCode = verificationCodes[email]
+        // 开发期调试日志：对比期望与输入（如需隐藏可改为部分掩码）
+        log.debug { "验证调试: email=$email, expected=$expectedCode, input=$inputCode" }
         
         return if (expectedCode == null) {
             StateResult.failure("验证码已过期")

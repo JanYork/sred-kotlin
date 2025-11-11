@@ -368,11 +368,16 @@ class StateMachine(private val flow: StateFlow) {
         event: Event,
         stateDef: StateFlow.StateDefinition
     ): StateResult {
+        // 在执行状态函数前，将事件载荷合并到局部状态，便于状态函数读取（如表单输入等）
+        val contextWithPayload = context.copy(
+            localState = context.localState + event.payload
+        )
+        
         // 执行状态函数
         val function = flow.functions[currentStateId]
         val result = if (function != null) {
             try {
-                function(context)
+                function(contextWithPayload)
             } catch (e: Exception) {
                 StateResult(false, error = e)
             }
@@ -383,8 +388,8 @@ class StateMachine(private val flow: StateFlow) {
         // 查找下一个状态
         val nextStateId = findNextState(currentStateId, result)
         
-        // 更新上下文（包含状态数据和新的状态ID）
-        val updatedLocalState = context.localState + result.data
+        // 更新上下文（合并事件载荷、状态数据，并更新状态ID）
+        val updatedLocalState = contextWithPayload.localState + result.data
         val newContext = context.copy(
             currentStateId = nextStateId,
             localState = updatedLocalState

@@ -63,6 +63,23 @@ class RegistrationApiService {
                 stopStates = null,    // 使用配置中的 pauseOnEnter，不硬编码
                 onStateChange = { from, to ->
                     log.info { "注册流程状态: ${from ?: "初始"} -> $to" }
+                    // 开发期辅助日志：当进入发送邮件或等待验证时，输出验证码，便于本地联调
+                    if (to == RegistrationStates.SENDING_EMAIL || to == RegistrationStates.WAITING_VERIFICATION) {
+                        try {
+                            runBlocking {
+                                val ctx = engine.getContext(instanceId)
+                                val email: String? = ctx?.getLocalState("email")
+                                val codeFromState: String? = ctx?.getLocalState("verificationCode")
+                                val code: String? = codeFromState ?: email?.let { e -> context.verificationCodes[e] }
+                                if (email != null && code != null) {
+                                    // 与 RegistrationView 的格式保持一致，方便 grep
+                                    log.info { "验证码已发送到 $email: $code" }
+                                }
+                            }
+                        } catch (_: Exception) {
+                            // 忽略开发期辅助日志的异常
+                        }
+                    }
                 },
                 onComplete = { state ->
                     log.info { "注册流程完成: $state" }
@@ -106,6 +123,15 @@ class RegistrationApiService {
                     finalState = currentState,
                     message = "当前状态不允许提交验证码，状态: $currentState"
                 )
+            }
+            
+            // 在触发事件前，先把验证码写入上下文的局部状态，供下一个状态函数读取
+            runBlocking {
+                val ctx = engine.getContext(instanceId)
+                if (ctx != null) {
+                    val updated = ctx.updateLocalState("inputCode", verificationCode)
+                    engine.getPersistence()?.saveContext(updated)
+                }
             }
             
                    // 触发验证码验证事件
