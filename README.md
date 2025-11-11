@@ -1,344 +1,215 @@
-# SRED - 状态轮转与事件驱动结合型架构
+## SRED - 状态轮转与事件驱动结合型架构 案例
 
-SRED（State Rotation and Event-Driven）是一个基于 Kotlin 的状态机框架，结合了状态轮转和事件驱动的设计理念，提供了强大的状态管理和持久化能力。
+SRED（State Rotation & Event-Driven）是一个以“状态为中心、事件驱动推进”的工作流/编排引擎。它把复杂业务拆解成显式状态与事件，支持长时间暂停、可持久化恢复的流程执行，适合实现注册、审批、转账等多阶段业务。
 
-## 特性
+### 主要能力
+- 状态流与转移：声明式定义状态、条件和转移，内置顺序/分支/并行模式
+- 事件驱动：以事件推进状态，事件负载会与上下文合并参与决策
+- 长时间暂停：可在某些状态自动暂停，支持服务重启后恢复执行
+- 持久化：上下文、事件、状态历史可落库（内置 SQLite 适配）
+- 注解绑定：`@StateHandler` 将业务函数绑定至状态
+- 类型安全访问：便捷的上下文数据读取 API
+- 健康检查与日志：Logback 输出、健康检测
 
-- ✅ **状态管理**：完整的状态机实现，支持状态注册、转移、历史追踪
-- ✅ **事件驱动**：基于事件的状态转移机制
-- ✅ **持久化适配器**：支持多种数据库（SQLite、MySQL、PostgreSQL 等）的适配器模式
-- ✅ **配置加载**：支持从本地文件或远程 URL 加载 JSON/XML/YAML 配置
-- ✅ **注解支持**：使用 `@StateHandler` 注解声明式绑定状态处理函数
-- ✅ **类型安全**：完整的类型安全的状态访问 API
-- ✅ **日志框架**：集成 SLF4J/Logback 日志系统
-- ✅ **资源管理**：自动资源管理和清理
-- ✅ **安全性**：URL 加载时的安全验证和限制
+---
 
-## 快速开始
+## 目录结构与各包职责
 
-### 1. 构建项目
+- `api/`
+  - `Application.kt`：Spring Boot 启动入口。
+  - `controllers/ApiController.kt`：REST API（转账与注册），约定返回码：处理中 202，成功 200，明确失败 400。
+  - `models/`：API 请求/响应模型，如 `RegistrationRequest/Response`。
+  - `services/`：API 编排服务，如 `RegistrationApiService` 维护引擎、异步执行与恢复。
+- `core/`
+  - 基础抽象与内核类型：`Event`, `StateContext`, `StateContextImpl`, `EventFactory`, 日志、异常等。
+  - 负责上下文、事件的标准化与类型安全访问。
+- `declarative/`
+  - 声明式状态流引擎：`StateFlow`, `StateMachine` 及注解绑定。支持顺序/条件/并行/Join 等执行模式。
+  - 关键点：在顺序模式中，事件 payload 会在调用状态函数前合并到 `localState`，便于状态函数读取输入。
+- `event/`
+  - 事件总线与分发（内部使用），统计、过滤等。
+- `orchestrator/`
+  - 智能编排器，提供“直到完成”的推进、暂停检测、错误处理等高层策略。
+- `persistence/`
+  - 持久化适配层，默认 SQLite。负责上下文/事件/状态历史的存取，支持从持久化“恢复实例”。
+- `policy/`
+  - 策略加载与版本管理（对高级场景开放）。
+- `health/`
+  - 健康检查实现（事件总线/持久化/状态管理等）。
+- `examples/`
+  - 示例业务：转账、分支、多工作流、注册等；注册示例包含领域模型、服务与视图。
+- `state/`
+  - 低层状态机管理的扩展实现。
+- `SRED.kt`
+  - 门面：统一创建 `SREDEngine`，加载配置、绑定处理器、启动编排器等。
 
+---
+
+## 核心原理与执行流程
+
+1) 配置加载
+- 通过 `SRED.fromConfig(configPath, dbPath, handlers)` 载入 JSON 配置，构建 `StateFlow → StateMachine`，绑定注解函数，创建 `SREDEngine`。
+- 如有 `dbPath`，初始化持久化适配器（如 SQLite）并记录上下文/事件/状态历史。
+
+2) 实例启动
+- `engine.start(instanceId, initialData)` 创建初始上下文（含初始状态），持久化上下文并启动实例。
+
+3) 推进执行（两种方式）
+- 自动推进：`engine.runUntilComplete(...)` 循环触发事件处理，直至到达终态或遇到“需暂停”的状态。
+- 外部控制：通过 `WorkflowExecutor.executeAsync` 后台推进；当遇到配置了 `pauseOnEnter=true` 的状态（如等待验证）自动暂停，等待外部事件唤醒。
+
+4) 事件处理
+- `engine.process(instanceId, eventType, eventName, payload)` 会：
+  - 构建 `Event` 并持久化
+  - 在 `StateMachine.processEvent` 中，按执行模式选择处理函数
+  - 顺序模式下：将 `event.payload` 合并到上下文 `localState` 后调用状态函数
+  - 根据 `StateResult` 与转移定义选择下一个状态，更新上下文并持久化
+
+5) 暂停与恢复
+- 当状态定义 `pauseOnEnter=true` 时，进入该状态会写入暂停 metadata，并在 `WorkflowExecutor` 中登记为暂停实例。
+- 外部通过 API 触发事件（如提交验证码）→ 继续执行 → 若状态发生转移，清除暂停标记并继续推进，直至终态。
+
+6) 终态与返回码建议
+- 成功终态（名称含 `success` 或配置 FINAL）：返回 200
+- 明确失败（名称含 `failed` 或 ERROR）：返回 400
+- 中间处理（非终态/非失败）：返回 202（Accepted）
+
+---
+
+## 配置模型（以注册为例）
+
+文件：`registration.json`
+- 状态：
+  - `registration_initiated`（INITIAL）
+  - `validating` → 校验用户输入
+  - `sending_email` → 发送验证码
+  - `waiting_verification`（pauseOnEnter=true）→ 暂停等待用户输入
+  - `verifying_code` → 校验验证码
+  - `activating` → 激活用户
+  - `registration_success`（FINAL）
+  - `registration_failed`（ERROR）
+- 转移条件：
+  - 典型为 `Success/Failure`，由 `StateResult` 决定。
+
+---
+
+## 生命周期与时序
+
+- 启动期：
+  - `Application.kt` 启动 Spring Boot；
+  - `RegistrationApiService` 初始化时创建引擎、注册到执行器、尝试从持久化恢复暂停实例。
+- 请求期：
+  - 发起注册：创建实例并后台推进到 `waiting_verification`，API 返回 202 与 `instanceId`。
+  - 提交验证码：将验证码写入上下文并触发 `verify` 事件，后台推进至 `registration_success`，API 在处理中返回 202，成功时 200。
+- 关闭期：
+  - 执行器与引擎关闭：清理任务，释放资源。
+
+---
+
+## 用户注册案例：端到端实现
+
+涉及文件：
+- `examples/registration/RegistrationStates.kt`：状态常量
+- `examples/registration/RegistrationDomain.kt`：领域模型 `RegistrationUser`
+- `examples/registration/RegistrationService.kt`：状态处理器（含 `@StateHandler`）
+- `examples/registration/RegistrationFixtures.kt`：内存上下文（用户表、验证码表）
+- `examples/registration/RegistrationView.kt`：示例输出（日志）
+- `api/services/RegistrationApiService.kt`：注册流程编排（引擎 + 执行器）
+- `api/controllers/ApiController.kt`：API 暴露
+- `registration.json`：注册流程配置
+
+状态处理器摘录（关键逻辑）：
+- 验证输入（`validating`）：校验用户名、邮箱格式、密码强度与重名；通过则写入 `validated=true`
+- 发送验证码（`sending_email`）：生成 6 位验证码写入 `verificationCodes[email]`，并把 `verificationCode` 写回上下文
+- 验证码校验（`verifying_code`）：比对 `inputCode` 与 `verificationCodes[email]`，成功写 `verified=true`
+- 激活账户（`activating`）：将用户状态置为 `ACTIVATED`，生成 `userId`
+
+执行编排（API 服务的关键点）：
+- 启动注册：`executeRegistration`
+  - `engine.start` → `executor.executeAsync(autoProcess=false)`，依配置暂停在 `waiting_verification`
+  - 返回 202，携带 `instanceId`
+  - 开发期日志会打印 `验证码已发送到 email: code`
+- 提交验证码：`submitVerificationCode`
+  - 先把验证码写入上下文的 `inputCode`
+  - 触发 `verify` 事件（`eventType=verify, payload={"inputCode": code}`）
+  - 若进入中间态（如 `verifying_code/activating`）返回 202；到达 `registration_success` 返回 200；错误返回 400
+
+API 一览（`/api/v1`）：
+- POST `/registration` 启动注册，返回 202 和 `instanceId`
+- POST `/registration/{instanceId}/verify` 提交验证码，中间态 202，成功 200，错误 400
+- GET `/registration/{instanceId}` 查询状态（随时可用）
+- GET `/health` 健康检查
+
+---
+
+## 本地运行与调试
+
+启动服务：
+```bash
+mvn spring-boot:run
+```
+
+注册用户：
+```bash
+curl -X POST http://localhost:8080/api/v1/registration \
+  -H "Content-Type: application/json" \
+  -d '{"username":"testuser","email":"test@example.com","password":"password123"}'
+```
+
+查看验证码：
+```bash
+tail -f logs/sred.log | grep 验证码
+```
+
+提交验证码：
+```bash
+curl -X POST http://localhost:8080/api/v1/registration/{instanceId}/verify \
+  -H "Content-Type: application/json" \
+  -d '{"verificationCode":"<日志中的验证码>"}'
+```
+
+查询状态：
+```bash
+curl http://localhost:8080/api/v1/registration/{instanceId}
+```
+
+HTTP 返回码约定：
+- 202 Accepted：流程已创建/处理中（未到终态）
+- 200 OK：到达成功终态
+- 400 Bad Request：明确失败或参数问题
+- 500 Internal Server Error：服务器错误
+
+---
+
+## 设计要点与最佳实践
+
+- 状态命名：建议以业务名作前缀，例如 `registration_*`，终态以 `_success/_failed` 结尾便于识别
+- 事件命名：`eventType.eventAction` 或简单 `eventType`，例如 `verify`/`process`
+- 数据传递：统一通过 `localState` 传递业务数据；外部事件 payload 会自动合并到 `localState`
+- 暂停/恢复：把“等待用户输入/外部系统回调”的状态配置为 `pauseOnEnter=true`
+- 幂等性：状态函数应尽量保证幂等；必要时检查 `context.metadata` 或数据库
+- 可观测性：启用 DEBUG 日志，结合状态历史/事件历史定位问题
+
+---
+
+## 依赖与开发
+
+- Kotlin、Coroutines、Spring Boot、Jackson、SQLite JDBC、SLF4J/Logback、JUnit 5
+
+常用命令：
 ```bash
 mvn clean compile
-```
-
-### 2. 运行示例
-
-```bash
-# 使用默认配置文件 sred.json
-mvn exec:java -Dexec.mainClass="me.ixor.sred.MainKt"
-
-# 或指定自定义配置文件
-mvn exec:java -Dexec.mainClass="me.ixor.sred.MainKt" -Dexec.args="custom-config.json"
-
-# 或使用远程 URL
-mvn exec:java -Dexec.mainClass="me.ixor.sred.MainKt" -Dexec.args="https://example.com/config.json"
-```
-
-### 3. 配置文件格式
-
-创建 `sred.json` 文件定义状态流程：
-
-```json
-{
-  "name": "转账流程",
-  "description": "用户转账的状态流程",
-  "version": "1.0.0",
-  "states": [
-    {
-      "id": "transfer_initiated",
-      "name": "转账已发起",
-      "type": "INITIAL",
-      "isInitial": true
-    },
-    {
-      "id": "validating_accounts",
-      "name": "验证账户",
-      "type": "NORMAL"
-    },
-    {
-      "id": "transfer_success",
-      "name": "转账成功",
-      "type": "FINAL",
-      "isFinal": true
-    }
-  ],
-  "transitions": [
-    {
-      "from": "transfer_initiated",
-      "to": "validating_accounts",
-      "condition": "Success",
-      "priority": 1
-    }
-  ]
-}
-```
-
-## 使用方法
-
-### 1. 创建状态处理器
-
-使用 `@StateHandler` 注解声明状态处理函数：
-
-```kotlin
-class TransferStateHandlers {
-    @StateHandler(
-        stateId = "validating_accounts",
-        description = "验证账户"
-    )
-    suspend fun validateAccounts(context: StateContext): StateResult {
-        val fromUserId = context.getLocalState<String>("fromUserId")
-        val toUserId = context.getLocalState<String>("toUserId")
-        
-        // 执行验证逻辑
-        if (isValid(fromUserId, toUserId)) {
-            return StateResult.success()
-        } else {
-            return StateResult.failure("账户验证失败")
-        }
-    }
-}
-```
-
-### 2. 加载配置并创建状态机
-
-```kotlin
-import me.ixor.sred.declarative.format.FormatLoader
-
-// 从本地文件加载
-val stateFlow = FormatLoader.load("sred.json")
-
-// 从远程 URL 加载
-val stateFlow = FormatLoader.load("https://example.com/config.json")
-
-// 绑定状态处理函数
-stateFlow.bindAnnotatedFunctions(TransferStateHandlers())
-
-// 构建状态机
-val stateMachine = stateFlow.build()
-```
-
-### 3. 使用持久化适配器
-
-```kotlin
-import me.ixor.sred.persistence.PersistenceAdapterFactory
-
-// 创建 SQLite 适配器
-val persistence = PersistenceAdapterFactory.createSqliteAdapter("mydb.db")
-persistence.initialize()
-
-// 使用 use 确保资源自动关闭
-persistence.use {
-    // 保存上下文
-    persistence.saveContext(context)
-    
-    // 加载上下文
-    val loaded = persistence.loadContext(contextId)
-    
-    // 保存事件历史
-    persistence.saveEvent(contextId, event)
-    
-    // 保存状态历史
-    persistence.saveStateHistory(contextId, fromState, toState, eventId)
-}
-```
-
-### 4. 创建和执行状态转移
-
-```kotlin
-// 创建初始上下文
-val context = StateContextFactory.builder()
-    .id("transfer_001")
-    .localState("fromUserId", "userA")
-    .localState("toUserId", "userB")
-    .localState("amount", 200.0)
-    .build()
-
-// 启动状态机实例
-val instance = stateMachine.start("transfer_001", context)
-
-// 发送事件触发状态转移
-val event = EventFactory.builder()
-    .type("transfer", "process")
-    .name("处理转账")
-    .source("system")
-    .build()
-
-val result = instance.processEvent(event)
-```
-
-### 5. 使用调度器（Orchestrator）
-
-```kotlin
-import me.ixor.sred.orchestrator.StateOrchestratorBuilder
-
-val orchestrator = StateOrchestratorBuilder.create()
-    .withSqlitePersistence("state.db")
-    .buildAndStart()
-
-// 处理事件
-val result = orchestrator.processEvent(event)
-```
-
-## 类型安全的状态访问
-
-使用扩展函数进行类型安全的状态访问：
-
-```kotlin
-// 获取局部状态（可空）
-val userId = context.getLocalState<String>("userId")
-
-// 获取局部状态（带默认值）
-val amount = context.getLocalStateOrDefault<Number>("amount", 0.0)
-
-// 获取全局状态
-val globalConfig = context.getGlobalState<Map<String, Any>>("config")
-
-// 获取元信息
-val metadata = context.getMetadata<Map<String, String>>("meta")
-```
-
-## 日志配置
-
-项目使用 SLF4J/Logback 进行日志管理。日志配置位于 `src/main/resources/logback.xml`。
-
-日志级别可以通过修改配置文件调整：
-
-```xml
-<logger name="me.ixor.sred" level="DEBUG" />
-```
-
-日志文件位置：
-- 控制台输出：标准输出
-- 所有日志：`logs/sred.log`
-- 错误日志：`logs/sred-error.log`
-
-## 持久化适配器
-
-### SQLite（已实现）
-
-```kotlin
-val adapter = PersistenceAdapterFactory.createSqliteAdapter("db.sqlite")
-```
-
-### 其他数据库（计划实现）
-
-- MySQL
-- PostgreSQL
-- H2
-- MongoDB
-- Redis
-
-## 配置加载
-
-### 从本地文件加载
-
-```kotlin
-val stateFlow = FormatLoader.loadFromFile("config.json")
-```
-
-### 从远程 URL 加载
-
-```kotlin
-val stateFlow = FormatLoader.loadFromUrl("https://example.com/config.json")
-```
-
-### 自动识别（推荐）
-
-```kotlin
-// 自动识别文件路径或 URL
-val stateFlow = FormatLoader.load("config.json")  // 本地文件
-val stateFlow = FormatLoader.load("https://example.com/config.json")  // 远程 URL
-```
-
-**安全特性**：
-- ✅ 只允许 HTTP/HTTPS 协议
-- ✅ 连接超时：10秒
-- ✅ 读取超时：30秒
-- ✅ 文件大小限制：10MB
-- ✅ SSL 证书验证
-
-## 错误处理
-
-框架提供了统一的异常类型：
-
-- `SredException`：基础异常类
-- `StateException`：状态相关异常
-- `EventException`：事件相关异常
-- `PersistenceException`：持久化相关异常
-- `ConfigurationException`：配置相关异常
-- `SecurityException`：安全相关异常
-- `ResourceException`：资源相关异常
-
-## 项目结构
-
-```
-sred-kotlin/
-├── src/main/kotlin/me/ixor/sred/
-│   ├── core/              # 核心接口和类型
-│   │   ├── Context.kt     # 状态上下文
-│   │   ├── Event.kt       # 事件定义
-│   │   ├── State.kt       # 状态定义
-│   │   ├── Logger.kt      # 日志工具
-│   │   └── SredException.kt # 异常定义
-│   ├── state/             # 状态管理
-│   │   ├── StateManager.kt
-│   │   └── StateRegistry.kt
-│   ├── event/             # 事件处理
-│   │   ├── EventBus.kt
-│   │   └── EventEmitter.kt
-│   ├── orchestrator/      # 调度器
-│   │   └── StateOrchestrator.kt
-│   ├── persistence/       # 持久化适配器
-│   │   ├── adapters/
-│   │   │   └── SqlitePersistenceAdapter.kt
-│   │   └── PersistenceAdapterFactory.kt
-│   └── declarative/       # 声明式 API
-│       ├── format/        # 格式加载器
-│       └── annotations/   # 注解处理
-├── sred.json              # 配置文件示例
-└── pom.xml                # Maven 配置
-```
-
-## 依赖
-
-- Kotlin 2.1.20
-- Kotlin Coroutines 1.7.3
-- Jackson (JSON/XML/YAML 处理)
-- SQLite JDBC 3.44.1.0
-- SLF4J/Logback (日志)
-- JUnit 5 (测试)
-
-## 开发
-
-### 运行测试
-
-```bash
 mvn test
-```
-
-### 编译
-
-```bash
-mvn clean compile
-```
-
-### 打包
-
-```bash
+mvn spring-boot:run
 mvn clean package
 ```
 
-## 许可证
+---
 
-本项目采用 MIT 许可证。
+## 许可证与贡献
 
-## 贡献
+- 许可证：MIT
+- 欢迎提交 Issue / PR
 
-欢迎提交 Issue 和 Pull Request！
-
-## 文档
-
-更多详细文档请参考：
-- [架构设计文档](docs/论%20状态轮转与事件驱动结合形架构.md)
+更多背景与设计动机，可阅读 `docs/论 状态轮转与事件驱动结合形架构.md`。
 
